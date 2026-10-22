@@ -16,6 +16,7 @@ import {
 interface VerticalCanvasPreviewProps {
   sourceUrl: string;
   sourceTitle?: string;
+  thumbnailUrl?: string | null;
   secondaryUrl: string;
   secondaryIsImage: boolean;
   watermarkEnabled: boolean;
@@ -34,6 +35,7 @@ interface VerticalCanvasPreviewProps {
 export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
   sourceUrl,
   sourceTitle = 'STUDIO MASTER 16:9',
+  thumbnailUrl = null,
   secondaryUrl,
   secondaryIsImage,
   watermarkEnabled,
@@ -55,6 +57,7 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
   const synthMainCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const synthBgCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const synthSecCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const thumbImageRef = useRef<HTMLImageElement | null>(null);
 
   const [useSyntheticSource, setUseSyntheticSource] = useState(
     sourceUrl.startsWith('builtin:')
@@ -69,6 +72,19 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(2);
   const [duration, setDuration] = useState(45);
+
+  useEffect(() => {
+    if (!thumbnailUrl) {
+      thumbImageRef.current = null;
+      return;
+    }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      thumbImageRef.current = img;
+    };
+    img.src = thumbnailUrl;
+  }, [thumbnailUrl]);
 
   useEffect(() => {
     setUseSyntheticSource(sourceUrl.startsWith('builtin:'));
@@ -106,13 +122,13 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
         if (synthMainCanvasRef.current) {
           const ctx = synthMainCanvasRef.current.getContext('2d');
           if (ctx) {
-            drawSyntheticFrame16x9(ctx, 480, 270, currentTime, sourceTitle);
+            drawSyntheticFrame16x9(ctx, 480, 270, currentTime, sourceTitle, thumbImageRef.current);
           }
         }
         if (synthBgCanvasRef.current) {
           const ctx = synthBgCanvasRef.current.getContext('2d');
           if (ctx) {
-            drawSyntheticFrame16x9(ctx, 320, 180, currentTime, sourceTitle);
+            drawSyntheticFrame16x9(ctx, 320, 180, currentTime, sourceTitle, thumbImageRef.current);
           }
         }
       }

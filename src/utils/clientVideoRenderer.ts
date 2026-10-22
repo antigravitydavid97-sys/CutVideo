@@ -19,15 +19,21 @@ export function drawSyntheticFrame16x9(
   w: number,
   h: number,
   timeSec: number,
-  title = 'STUDIO MASTER 16:9'
+  title = 'STUDIO MASTER 16:9',
+  bgImage?: HTMLImageElement | null
 ) {
-  // Deep broadcast background gradient
-  const grad = ctx.createLinearGradient(0, 0, w, h);
-  grad.addColorStop(0, '#0f172a');
-  grad.addColorStop(0.5, '#1e293b');
-  grad.addColorStop(1, '#090d16');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, w, h);
+  if (bgImage && bgImage.complete && bgImage.naturalWidth > 0) {
+    ctx.drawImage(bgImage, 0, 0, w, h);
+    ctx.fillStyle = 'rgba(9, 13, 22, 0.35)';
+    ctx.fillRect(0, 0, w, h);
+  } else {
+    const grad = ctx.createLinearGradient(0, 0, w, h);
+    grad.addColorStop(0, '#0f172a');
+    grad.addColorStop(0.5, '#1e293b');
+    grad.addColorStop(1, '#090d16');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+  }
 
   // Animated broadcast waveform bars
   const barCount = 24;
@@ -38,9 +44,14 @@ export function drawSyntheticFrame16x9(
     const wave =
       Math.sin(timeSec * 4.2 + i * 0.45) * 0.5 +
       Math.cos(timeSec * 2.7 - i * 0.3) * 0.5;
-    const barH = Math.max(12, Math.abs(wave) * (h * 0.42));
+    const barH = Math.max(10, Math.abs(wave) * (h * (bgImage ? 0.24 : 0.42)));
     ctx.fillStyle = i % 3 === 0 ? '#f59e0b' : '#38bdf8';
-    ctx.fillRect(startX + i * stepX, h * 0.56 - barH / 2, stepX * 0.65, barH);
+    ctx.fillRect(
+      startX + i * stepX,
+      (bgImage ? h * 0.72 : h * 0.56) - barH / 2,
+      stepX * 0.65,
+      barH
+    );
   }
 
   // Top broadcast banner
@@ -57,7 +68,7 @@ export function drawSyntheticFrame16x9(
   const frames = String(Math.floor((timeSec % 1) * 24)).padStart(2, '0');
   ctx.fillStyle = '#f59e0b';
   ctx.font = `bold ${Math.max(13, Math.round(h * 0.06))}px monospace`;
-  ctx.fillText(`TC 00:${mins}:${secs}:${frames}`, w * 0.05, h * 0.88);
+  ctx.fillText(`TC 00:${mins}:${secs}:${frames}`, w * 0.05, h * 0.9);
 }
 
 export function drawSyntheticSecondaryLoop(
@@ -69,7 +80,6 @@ export function drawSyntheticSecondaryLoop(
   ctx.fillStyle = '#090d16';
   ctx.fillRect(0, 0, w, h);
 
-  // Concentric kinetic rings (satisfying retention loop)
   const cx = w / 2;
   const cy = h / 2;
   const maxR = Math.min(w, h) * 0.44;
@@ -93,6 +103,47 @@ export function drawSyntheticSecondaryLoop(
   ctx.textAlign = 'start';
 }
 
+function loadOptionalVideo(url: string, startSec: number): Promise<HTMLVideoElement | null> {
+  if (!url || url.startsWith('builtin:')) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const vid = document.createElement('video');
+    vid.crossOrigin = 'anonymous';
+    vid.muted = true;
+    vid.playsInline = true;
+    vid.src = url;
+
+    const timeout = setTimeout(() => resolve(null), 3500);
+    vid.onloadeddata = () => {
+      clearTimeout(timeout);
+      vid.currentTime = Math.min(startSec, Math.max(0, (vid.duration || 10) - 0.5));
+      vid.play().catch(() => {});
+      resolve(vid);
+    };
+    vid.onerror = () => {
+      clearTimeout(timeout);
+      resolve(null);
+    };
+  });
+}
+
+function loadOptionalImage(url?: string | null): Promise<HTMLImageElement | null> {
+  if (!url || url.startsWith('builtin:')) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    const timeout = setTimeout(() => resolve(null), 3000);
+    img.onload = () => {
+      clearTimeout(timeout);
+      resolve(img);
+    };
+    img.onerror = () => {
+      clearTimeout(timeout);
+      resolve(null);
+    };
+    img.src = url;
+  });
+}
+
 export async function renderClientFallbackClip(params: {
   clip: ClipItem;
   templateId: TemplateId;
@@ -101,7 +152,9 @@ export async function renderClientFallbackClip(params: {
   watermarkPosition: WatermarkPosition;
   watermarkScale: number;
   sourceTitle: string;
-}): Promise<{ blobUrl: string; sizeKb: number; durationMs: number }> {
+  sourceUrl?: string;
+  thumbnailUrl?: string | null;
+}): Promise<{ blobUrl: string; sizeKb: number; durationMs: number; ext: string }> {
   const t0 = Date.now();
   const canvas = document.createElement('canvas');
   canvas.width = 540;
@@ -110,28 +163,39 @@ export async function renderClientFallbackClip(params: {
 
   const startSec = parseTimecodeToSeconds(params.clip.startTime);
   const endSec = parseTimecodeToSeconds(params.clip.endTime);
-  const clipDurationSec = Math.max(2, Math.min(6, endSec - startSec || 4));
+  const clipDurationSec = Math.max(2, Math.min(8, endSec - startSec || 4));
+
+  const realVideo = await loadOptionalVideo(params.sourceUrl || '', startSec);
+  const thumbImg = !realVideo ? await loadOptionalImage(params.thumbnailUrl) : null;
 
   const stream = canvas.captureStream(24);
-  const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-    ? 'video/webm;codecs=vp9'
-    : MediaRecorder.isTypeSupported('video/webm')
-    ? 'video/webm'
-    : '';
+  const preferredTypes = [
+    'video/mp4;codecs=avc1',
+    'video/mp4',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+  const supportedMime =
+    preferredTypes.find((t) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t)) || '';
+  const ext = supportedMime.includes('mp4') ? 'mp4' : 'webm';
 
   const chunks: BlobPart[] = [];
-  const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+  const recorder = supportedMime
+    ? new MediaRecorder(stream, { mimeType: supportedMime })
+    : new MediaRecorder(stream);
+
   recorder.ondataavailable = (e) => {
     if (e.data && e.data.size > 0) chunks.push(e.data);
   };
 
   const stopPromise = new Promise<Blob>((resolve) => {
     recorder.onstop = () => {
-      resolve(new Blob(chunks, { type: mimeType || 'video/webm' }));
+      resolve(new Blob(chunks, { type: supportedMime || 'video/webm' }));
     };
   });
 
-  recorder.start();
+  recorder.start(100);
 
   const totalFrames = Math.round(clipDurationSec * 20);
   const offscreen16x9 = document.createElement('canvas');
@@ -145,8 +209,12 @@ export async function renderClientFallbackClip(params: {
   const secCtx = offscreenSec.getContext('2d')!;
 
   for (let f = 0; f < totalFrames; f++) {
-    const currentTc = startSec + (f / 20);
-    drawSyntheticFrame16x9(offCtx, 640, 360, currentTc, params.sourceTitle);
+    const currentTc = startSec + f / 20;
+    if (realVideo && realVideo.readyState >= 2) {
+      offCtx.drawImage(realVideo, 0, 0, 640, 360);
+    } else {
+      drawSyntheticFrame16x9(offCtx, 640, 360, currentTc, params.sourceTitle, thumbImg);
+    }
 
     const W = canvas.width;
     const H = canvas.height;
@@ -225,7 +293,12 @@ export async function renderClientFallbackClip(params: {
       ctx.textAlign = 'start';
     }
 
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 35));
+  }
+
+  if (realVideo) {
+    realVideo.pause();
+    realVideo.src = '';
   }
 
   recorder.stop();
@@ -235,5 +308,18 @@ export async function renderClientFallbackClip(params: {
     blobUrl,
     sizeKb: Math.max(48, Math.round(blob.size / 1024)),
     durationMs: Date.now() - t0,
+    ext,
   };
+}
+
+export function triggerBrowserDownload(blobOrUrl: string, filename: string) {
+  const a = document.createElement('a');
+  a.href = blobOrUrl;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+  }, 300);
 }

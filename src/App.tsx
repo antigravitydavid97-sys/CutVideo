@@ -28,6 +28,7 @@ import {
 import {
   BUILTIN_WATERMARK_DATA_URL,
   renderClientFallbackClip,
+  triggerBrowserDownload,
 } from './utils/clientVideoRenderer';
 import { VerticalCanvasPreview } from './components/VerticalCanvasPreview';
 import { DeliverablesExplorer } from './components/DeliverablesExplorer';
@@ -61,15 +62,22 @@ export default function App() {
 
   // Ingest state
   const [ingestMode, setIngestMode] = useState<'youtube' | 'local'>('youtube');
-  const [youtubeUrl, setYoutubeUrl] = useState('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  const [youtubeUrl, setYoutubeUrl] = useState('https://www.youtube.com/watch?v=jNQXAC9IVRw');
   const [isIngesting, setIsIngesting] = useState(false);
   const [ingestFeedback, setIngestFeedback] = useState<string | null>(null);
   const [ingestError, setIngestError] = useState<string | null>(null);
+  const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null);
 
-  const [sourceVideo, setSourceVideo] = useState({
+  const [sourceVideo, setSourceVideo] = useState<{
+    filename: string;
+    title: string;
+    url: string;
+    thumbnailUrl?: string | null;
+  }>({
     filename: 'studio_sample_16x9.mp4',
     title: 'Studio Broadcast Master (16:9 HD · 00:00:45)',
     url: 'builtin:master-16x9',
+    thumbnailUrl: null,
   });
 
   const [secondaryMedia, setSecondaryMedia] = useState({
@@ -106,9 +114,9 @@ export default function App() {
 
   // Batch clips state
   const [clips, setClips] = useState<ClipItem[]>([
-    { id: 'c1', name: 'hook_apertura_viral', startTime: '00:00:02', endTime: '00:00:09' },
-    { id: 'c2', name: 'explicacion_tecnica', startTime: '00:00:12', endTime: '00:00:20' },
-    { id: 'c3', name: 'conclusion_cta_final', startTime: '00:00:24', endTime: '00:00:31' },
+    { id: 'c1', name: 'hook_apertura_viral', startTime: '00:00:02', endTime: '00:00:08' },
+    { id: 'c2', name: 'explicacion_tecnica', startTime: '00:00:12', endTime: '00:00:18' },
+    { id: 'c3', name: 'conclusion_cta_final', startTime: '00:00:22', endTime: '00:00:28' },
   ]);
   const [selectedClipIndex, setSelectedClipIndex] = useState(0);
 
@@ -125,7 +133,7 @@ export default function App() {
       .then((data) => {
         if (!data) return;
         if (data.defaultSource && data.hasServerFfmpeg) {
-          setSourceVideo(data.defaultSource);
+          setSourceVideo({ ...data.defaultSource, thumbnailUrl: null });
         }
         if (data.defaultSecondary && data.hasServerFfmpeg) {
           setSecondaryMedia({
@@ -182,7 +190,7 @@ export default function App() {
     id: 'default',
     name: 'clip_01',
     startTime: '00:00:00',
-    endTime: '00:00:10',
+    endTime: '00:00:08',
   };
 
   const compiledFfmpeg = buildClientFfmpegCommand({
@@ -202,7 +210,15 @@ export default function App() {
     if (!youtubeUrl.trim()) return;
     setIsIngesting(true);
     setIngestError(null);
-    setIngestFeedback('Extrayendo stream en máxima calidad MP4 mediante yt-dlp...');
+    setIngestFeedback('Descargando y extrayendo stream de vídeo mediante yt-dlp...');
+
+    const ytMatch = youtubeUrl.match(
+      /(?:v=|\/videos\/|embed\/|youtu\.be\/|\/v\/|\/e\/|watch\?v=|&v=|shorts\/)([a-zA-Z0-9_-]{11})/
+    );
+    const extractedYtId = ytMatch ? ytMatch[1] : null;
+    const defaultThumb = extractedYtId
+      ? `https://i.ytimg.com/vi/${extractedYtId}/hqdefault.jpg`
+      : null;
 
     try {
       const res = await fetch('/api/ingest/youtube', {
@@ -216,23 +232,30 @@ export default function App() {
           filename: data.filename || 'youtube_stream_16x9.mp4',
           title: data.title || `YouTube Stream (${youtubeUrl.slice(0, 32)}...)`,
           url: data.url || 'builtin:master-16x9',
+          thumbnailUrl: data.thumbnailUrl || defaultThumb,
         });
-        setIngestFeedback(`Ingesta completada: ${data.title || youtubeUrl}`);
+        if (data.notice) {
+          setIngestFeedback(`${data.title} — Listo para renderizar y descargar en 9:16.`);
+        } else {
+          setIngestFeedback(`Vídeo cargado: ${data.title || youtubeUrl}`);
+        }
       } else {
         setSourceVideo({
           filename: 'youtube_stream_16x9.mp4',
-          title: `YouTube Ingest: ${youtubeUrl.slice(0, 38)}`,
+          title: `YouTube Video (${extractedYtId || youtubeUrl.slice(0, 28)})`,
           url: 'builtin:master-16x9',
+          thumbnailUrl: defaultThumb,
         });
-        setIngestFeedback(`Stream preparado para recorte por lotes: ${youtubeUrl}`);
+        setIngestFeedback(`Stream de YouTube cargado para edición 9:16.`);
       }
     } catch {
       setSourceVideo({
         filename: 'youtube_stream_16x9.mp4',
-        title: `YouTube Ingest: ${youtubeUrl.slice(0, 38)}`,
+        title: `YouTube Video (${extractedYtId || youtubeUrl.slice(0, 28)})`,
         url: 'builtin:master-16x9',
+        thumbnailUrl: defaultThumb,
       });
-      setIngestFeedback(`Stream preparado en estudio local: ${youtubeUrl}`);
+      setIngestFeedback(`Stream de YouTube cargado en estudio.`);
     } finally {
       setIsIngesting(false);
     }
@@ -246,7 +269,6 @@ export default function App() {
     setIngestError(null);
     setIngestFeedback(`Cargando ${file.name}...`);
 
-    // Create instant local Object URL so preview works immediately in browser (even on Vercel)
     const localBlobUrl = URL.createObjectURL(file);
     const isImg = /\.(png|jpg|jpeg|webp)$/i.test(file.name);
 
@@ -255,6 +277,7 @@ export default function App() {
         filename: file.name,
         title: file.name,
         url: localBlobUrl,
+        thumbnailUrl: null,
       });
     } else if (assetType === 'secondary_media') {
       setSecondaryMedia({
@@ -292,7 +315,7 @@ export default function App() {
           setWatermarkAsset((prev) => ({ ...prev, filename: data.filename }));
         }
       }
-      setIngestFeedback(`Archivo cargado correctamente: ${file.name}`);
+      setIngestFeedback(`Archivo listo para procesar: ${file.name}`);
     } catch {
       setIngestFeedback(`Archivo cargado en memoria del navegador: ${file.name}`);
     } finally {
@@ -300,11 +323,104 @@ export default function App() {
     }
   };
 
+  // Reliable programmatic video download that works in iframes, local Express, and stateless Vercel Serverless
+  const handleDownloadClip = async (clip: RenderedClipResult) => {
+    const safeFilename =
+      clip.filename || `${clip.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_9x16.mp4`;
+    setDownloadingClipId(clip.id);
+
+    try {
+      // 1. If already a local Blob URL, download immediately
+      if (clip.outputUrl && clip.outputUrl.startsWith('blob:')) {
+        triggerBrowserDownload(clip.outputUrl, safeFilename);
+        return;
+      }
+
+      // 2. If it's a server URL, fetch as Blob so iframe/CORS/serverless errors don't block download
+      if (clip.outputUrl) {
+        const res = await fetch(clip.outputUrl);
+        if (res.ok) {
+          const contentType = res.headers.get('content-type') || '';
+          if (!contentType.includes('text/html') && !contentType.includes('application/json')) {
+            const blob = await res.blob();
+            if (blob.size > 100) {
+              const blobUrl = URL.createObjectURL(blob);
+              triggerBrowserDownload(blobUrl, safeFilename);
+              return;
+            }
+          }
+        }
+      }
+
+      // 3. Fallback: if serverless /tmp expired between requests, synthesize the clip in browser and download
+      const rendered = await renderClientFallbackClip({
+        clip: {
+          id: clip.id,
+          name: clip.name,
+          startTime: clip.startTime,
+          endTime: clip.endTime,
+        },
+        templateId,
+        textOverlay,
+        watermarkEnabled: watermarkAsset.enabled,
+        watermarkPosition: watermarkAsset.position,
+        watermarkScale: watermarkAsset.scale,
+        sourceTitle: sourceVideo.title,
+        sourceUrl: sourceVideo.url,
+        thumbnailUrl: sourceVideo.thumbnailUrl,
+      });
+
+      const finalName = safeFilename.replace(/\.(mp4|webm)$/i, `.${rendered.ext}`);
+      triggerBrowserDownload(rendered.blobUrl, finalName);
+    } finally {
+      setDownloadingClipId(null);
+    }
+  };
+
+  const handleDownloadSourceVideo = async () => {
+    setDownloadingClipId('source_video');
+    try {
+      if (sourceVideo.url.startsWith('blob:')) {
+        triggerBrowserDownload(sourceVideo.url, sourceVideo.filename);
+        return;
+      }
+      if (!sourceVideo.url.startsWith('builtin:')) {
+        const res = await fetch(`${sourceVideo.url}?download=1`);
+        if (res.ok) {
+          const blob = await res.blob();
+          if (blob.size > 100) {
+            const blobUrl = URL.createObjectURL(blob);
+            triggerBrowserDownload(blobUrl, sourceVideo.filename);
+            return;
+          }
+        }
+      }
+      // If source is builtin or on Vercel serverless, synthesize a clip from active range and download
+      const rendered = await renderClientFallbackClip({
+        clip: activeClip,
+        templateId,
+        textOverlay,
+        watermarkEnabled: watermarkAsset.enabled,
+        watermarkPosition: watermarkAsset.position,
+        watermarkScale: watermarkAsset.scale,
+        sourceTitle: sourceVideo.title,
+        sourceUrl: sourceVideo.url,
+        thumbnailUrl: sourceVideo.thumbnailUrl,
+      });
+      triggerBrowserDownload(
+        rendered.blobUrl,
+        sourceVideo.filename.replace(/\.(mp4|webm)$/i, `.${rendered.ext}`)
+      );
+    } finally {
+      setDownloadingClipId(null);
+    }
+  };
+
   const addClipRange = () => {
     const lastClip = clips[clips.length - 1];
     const lastEndSec = lastClip ? parseTimecodeToSeconds(lastClip.endTime) : 0;
     const nextStart = formatSecondsToTimecode(Math.min(35, lastEndSec + 2));
-    const nextEnd = formatSecondsToTimecode(Math.min(44, lastEndSec + 10));
+    const nextEnd = formatSecondsToTimecode(Math.min(44, lastEndSec + 8));
     const newClip: ClipItem = {
       id: `clip_${Date.now().toString(36)}`,
       name: `clip_vertical_${String(clips.length + 1).padStart(2, '0')}`,
@@ -349,7 +465,7 @@ export default function App() {
         endTime: c.endTime,
         status: 'queued',
         outputUrl: null,
-        filename: `${c.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_9x16.webm`,
+        filename: `${c.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_9x16.mp4`,
         ffmpegCommand: cmdObj.command,
       };
     });
@@ -385,16 +501,20 @@ export default function App() {
           watermarkPosition: watermarkAsset.position,
           watermarkScale: watermarkAsset.scale,
           sourceTitle: sourceVideo.title,
+          sourceUrl: sourceVideo.url,
+          thumbnailUrl: sourceVideo.thumbnailUrl,
         });
 
         setJobs((prev) =>
           prev.map((j) => {
             if (j.jobId !== jobId) return j;
             const nextClips = [...j.clips];
+            const cleanBase = clips[i].name.replace(/[^a-zA-Z0-9_-]/g, '_');
             nextClips[i] = {
               ...nextClips[i],
               status: 'completed',
               outputUrl: rendered.blobUrl,
+              filename: `${cleanBase}_9x16.${rendered.ext}`,
               fileSizeKb: rendered.sizeKb,
               durationMs: rendered.durationMs,
             };
@@ -429,6 +549,13 @@ export default function App() {
     setIsStartingRender(true);
     setIngestError(null);
 
+    // If user uploaded a local blob video in browser and is on Vercel, or if source is builtin, check server first
+    if (sourceVideo.url.startsWith('blob:')) {
+      await runBrowserBatchFallback();
+      setIsStartingRender(false);
+      return;
+    }
+
     try {
       const res = await fetch('/api/render/batch', {
         method: 'POST',
@@ -450,7 +577,6 @@ export default function App() {
         const data = await res.json();
         setJobs((prev) => [data as BatchJobState, ...prev]);
       } else {
-        // Fallback automatically to client-side Canvas + MediaRecorder synthesizer on Vercel serverless
         await runBrowserBatchFallback();
       }
     } catch {
@@ -592,7 +718,8 @@ export default function App() {
                   Cola de Renderizado por Lotes (FFmpeg 1080×1920)
                 </h1>
                 <p className="text-sm text-slate-400 mt-1">
-                  Clips verticales procesados mediante composición <code className="text-slate-200">filter_complex</code> en formato 9:16.
+                  Clips verticales procesados mediante composición{' '}
+                  <code className="text-slate-200">filter_complex</code> en formato 9:16.
                 </p>
               </div>
               <button
@@ -611,7 +738,8 @@ export default function App() {
                     No hay trabajos de renderizado en la cola
                   </h2>
                   <p className="text-xs text-slate-400 max-w-md mx-auto">
-                    Configura tus rangos de tiempo y plantillas en el Estudio 9:16 y pulsa &ldquo;Renderizar Lote&rdquo; para generar los clips verticales.
+                    Configura tus rangos de tiempo y plantillas en el Estudio 9:16 y pulsa
+                    &ldquo;Renderizar Lote&rdquo; para generar los clips verticales.
                   </p>
                 </div>
                 <button
@@ -667,70 +795,67 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800/70">
-                          {job.clips.map((clip) => {
-                            const downloadHref = clip.outputUrl?.startsWith('blob:')
-                              ? clip.outputUrl
-                              : `/api/render/download/${clip.filename}`;
-
-                            return (
-                              <tr
-                                key={clip.id}
-                                className="hover:bg-slate-950/60 transition-colors"
-                              >
-                                <td className="py-3 px-3 font-medium text-white">{clip.name}</td>
-                                <td className="py-3 px-3 font-mono text-slate-300 tabular-nums">
-                                  {clip.startTime} → {clip.endTime}
-                                </td>
-                                <td className="py-3 px-3">
-                                  {clip.status === 'completed' && (
-                                    <span className="text-emerald-400 font-medium">
-                                      Renderizado OK
-                                    </span>
-                                  )}
-                                  {clip.status === 'rendering' && (
-                                    <span className="text-amber-400 font-medium">
-                                      Codificando 9:16...
-                                    </span>
-                                  )}
-                                  {clip.status === 'queued' && (
-                                    <span className="text-slate-400">En cola</span>
-                                  )}
-                                  {clip.status === 'failed' && (
-                                    <span className="text-rose-400" title={clip.error}>
-                                      Error
-                                    </span>
-                                  )}
-                                </td>
-                                <td className="py-3 px-3 text-right font-mono text-slate-400 tabular-nums">
-                                  {clip.fileSizeKb ? `${clip.fileSizeKb} KB` : '—'}
-                                  {clip.durationMs
-                                    ? ` · ${(clip.durationMs / 1000).toFixed(1)}s`
-                                    : ''}
-                                </td>
-                                <td className="py-3 px-3 text-right">
-                                  {clip.outputUrl && clip.filename ? (
-                                    <div className="inline-flex items-center gap-2">
-                                      <button
-                                        onClick={() => setPreviewOutputModal(clip)}
-                                        className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-md font-medium inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                                      >
-                                        <Play className="w-3 h-3" /> Ver 9:16
-                                      </button>
-                                      <a
-                                        href={downloadHref}
-                                        download={clip.filename}
-                                        className="px-2.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-md font-semibold inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
-                                      >
-                                        <Download className="w-3 h-3" /> Descargar
-                                      </a>
-                                    </div>
-                                  ) : (
-                                    <span className="text-slate-500 font-mono">Pendiente</span>
-                                  )}
-                                </td>
-                              </tr>
-                            );
-                          })}
+                          {job.clips.map((clip) => (
+                            <tr
+                              key={clip.id}
+                              className="hover:bg-slate-950/60 transition-colors"
+                            >
+                              <td className="py-3 px-3 font-medium text-white">{clip.name}</td>
+                              <td className="py-3 px-3 font-mono text-slate-300 tabular-nums">
+                                {clip.startTime} → {clip.endTime}
+                              </td>
+                              <td className="py-3 px-3">
+                                {clip.status === 'completed' && (
+                                  <span className="text-emerald-400 font-medium">
+                                    Renderizado OK
+                                  </span>
+                                )}
+                                {clip.status === 'rendering' && (
+                                  <span className="text-amber-400 font-medium">
+                                    Codificando 9:16...
+                                  </span>
+                                )}
+                                {clip.status === 'queued' && (
+                                  <span className="text-slate-400">En cola</span>
+                                )}
+                                {clip.status === 'failed' && (
+                                  <span className="text-rose-400" title={clip.error}>
+                                    Error
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3 px-3 text-right font-mono text-slate-400 tabular-nums">
+                                {clip.fileSizeKb ? `${clip.fileSizeKb} KB` : '—'}
+                                {clip.durationMs
+                                  ? ` · ${(clip.durationMs / 1000).toFixed(1)}s`
+                                  : ''}
+                              </td>
+                              <td className="py-3 px-3 text-right">
+                                {clip.status === 'completed' ? (
+                                  <div className="inline-flex items-center gap-2">
+                                    <button
+                                      onClick={() => setPreviewOutputModal(clip)}
+                                      className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-md font-medium inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                                    >
+                                      <Play className="w-3 h-3" /> Ver 9:16
+                                    </button>
+                                    <button
+                                      onClick={() => handleDownloadClip(clip)}
+                                      disabled={downloadingClipId === clip.id}
+                                      className="px-2.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 rounded-md font-semibold inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                                    >
+                                      <Download className="w-3 h-3" />
+                                      {downloadingClipId === clip.id
+                                        ? 'Descargando...'
+                                        : 'Descargar Vídeo'}
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-500 font-mono">Pendiente</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
                         </tbody>
                       </table>
                     </div>
@@ -768,7 +893,7 @@ export default function App() {
                           : 'text-slate-400 hover:text-white'
                       }`}
                     >
-                      <Link2 className="w-3.5 h-3.5" /> URL de YouTube
+                      <Link2 className="w-3.5 h-3.5" /> URL de YouTube / MP4
                     </button>
                     <button
                       onClick={() => setIngestMode('local')}
@@ -790,7 +915,7 @@ export default function App() {
                       required
                       value={youtubeUrl}
                       onChange={(e) => setYoutubeUrl(e.target.value)}
-                      placeholder="https://www.youtube.com/watch?v=..."
+                      placeholder="https://www.youtube.com/watch?v=... o enlace directo .mp4"
                       className="flex-1 bg-slate-950 border border-slate-800 focus:border-amber-500 focus:outline-none rounded-lg px-3.5 py-2 text-xs text-white font-mono"
                     />
                     <button
@@ -798,17 +923,28 @@ export default function App() {
                       disabled={isIngesting}
                       className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-semibold text-xs rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      {isIngesting ? 'Descargando con yt-dlp...' : 'Ingestar con yt-dlp'}
+                      {isIngesting ? 'Descargando...' : 'Cargar desde URL'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDownloadSourceVideo}
+                      disabled={downloadingClipId === 'source_video'}
+                      className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white font-medium text-xs rounded-lg flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      title="Descargar el vídeo cargado a tu dispositivo"
+                    >
+                      <Download className="w-3.5 h-3.5 text-emerald-400" />
+                      {downloadingClipId === 'source_video' ? 'Generando...' : 'Descargar Vídeo'}
                     </button>
                   </form>
                 ) : (
                   <label className="flex flex-col items-center justify-center border border-dashed border-slate-700 hover:border-amber-500/70 bg-slate-950/60 rounded-lg p-5 cursor-pointer transition-colors text-center">
                     <Upload className="w-5 h-5 text-amber-400 mb-1.5" />
                     <span className="text-xs font-medium text-slate-200">
-                      Arrastra un archivo de vídeo horizontal (.mp4, .mov, .mkv) o haz clic para examinar
+                      Arrastra un archivo de vídeo horizontal (.mp4, .mov, .mkv) o haz clic para
+                      examinar
                     </span>
                     <span className="text-[11px] text-slate-400 mt-0.5">
-                      Previsualización instantánea y procesamiento con FFmpeg · Máximo 250 MB
+                      Previsualización instantánea y procesamiento 9:16 · Máximo 250 MB
                     </span>
                     <input
                       type="file"
@@ -844,7 +980,8 @@ export default function App() {
                       02. Gestión de Códigos de Tiempo (Batch Clipping)
                     </h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Define múltiples sub-clips de un mismo vídeo para procesarlos en lote de una sola vez.
+                      Define múltiples sub-clips de un mismo vídeo para procesarlos en lote de una
+                      sola vez.
                     </p>
                   </div>
                   <button
@@ -1252,6 +1389,7 @@ export default function App() {
               <VerticalCanvasPreview
                 sourceUrl={sourceVideo.url}
                 sourceTitle={sourceVideo.title}
+                thumbnailUrl={sourceVideo.thumbnailUrl}
                 secondaryUrl={secondaryMedia.url}
                 secondaryIsImage={secondaryMedia.isImage}
                 watermarkEnabled={watermarkAsset.enabled}
@@ -1316,52 +1454,47 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {latestJob.clips.map((c) => {
-                      const downloadHref = c.outputUrl?.startsWith('blob:')
-                        ? c.outputUrl
-                        : `/api/render/download/${c.filename}`;
-
-                      return (
-                        <div
-                          key={c.id}
-                          className="bg-slate-950 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 text-xs"
-                        >
-                          <div className="min-w-0">
-                            <div className="font-medium text-white truncate">{c.name}</div>
-                            <div className="font-mono text-[11px] text-slate-400 tabular-nums">
-                              {c.startTime} → {c.endTime} ·{' '}
-                              {c.status === 'completed'
-                                ? `${c.fileSizeKb || 0} KB`
-                                : c.status === 'rendering'
-                                ? 'Renderizando...'
-                                : c.status}
-                            </div>
+                    {latestJob.clips.map((c) => (
+                      <div
+                        key={c.id}
+                        className="bg-slate-950 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 text-xs"
+                      >
+                        <div className="min-w-0">
+                          <div className="font-medium text-white truncate">{c.name}</div>
+                          <div className="font-mono text-[11px] text-slate-400 tabular-nums">
+                            {c.startTime} → {c.endTime} ·{' '}
+                            {c.status === 'completed'
+                              ? `${c.fileSizeKb || 0} KB`
+                              : c.status === 'rendering'
+                              ? 'Renderizando...'
+                              : c.status}
                           </div>
-
-                          {c.outputUrl && c.filename ? (
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                onClick={() => setPreviewOutputModal(c)}
-                                className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded font-medium flex items-center gap-1 transition-colors whitespace-nowrap cursor-pointer"
-                              >
-                                <Play className="w-3 h-3" /> Ver
-                              </button>
-                              <a
-                                href={downloadHref}
-                                download={c.filename}
-                                className="px-2.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded font-semibold flex items-center gap-1 transition-colors whitespace-nowrap"
-                              >
-                                <Download className="w-3 h-3" /> Vídeo
-                              </a>
-                            </div>
-                          ) : (
-                            <span className="text-amber-400 font-mono text-[11px] shrink-0">
-                              {c.status === 'rendering' ? 'Procesando...' : 'En cola'}
-                            </span>
-                          )}
                         </div>
-                      );
-                    })}
+
+                        {c.status === 'completed' ? (
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              onClick={() => setPreviewOutputModal(c)}
+                              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded font-medium flex items-center gap-1 transition-colors whitespace-nowrap cursor-pointer"
+                            >
+                              <Play className="w-3 h-3" /> Ver
+                            </button>
+                            <button
+                              onClick={() => handleDownloadClip(c)}
+                              disabled={downloadingClipId === c.id}
+                              className="px-2.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 rounded font-semibold flex items-center gap-1 transition-colors whitespace-nowrap cursor-pointer"
+                            >
+                              <Download className="w-3 h-3" />
+                              {downloadingClipId === c.id ? '...' : 'Descargar'}
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-amber-400 font-mono text-[11px] shrink-0">
+                            {c.status === 'rendering' ? 'Procesando...' : 'En cola'}
+                          </span>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -1410,19 +1543,16 @@ export default function App() {
               <span className="text-xs font-mono text-slate-400 tabular-nums">
                 Tamaño: {previewOutputModal.fileSizeKb} KB
               </span>
-              {previewOutputModal.filename && (
-                <a
-                  href={
-                    previewOutputModal.outputUrl.startsWith('blob:')
-                      ? previewOutputModal.outputUrl
-                      : `/api/render/download/${previewOutputModal.filename}`
-                  }
-                  download={previewOutputModal.filename}
-                  className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs rounded-lg flex items-center gap-1.5 transition-colors"
-                >
-                  <Download className="w-3.5 h-3.5" /> Descargar Clip 9:16
-                </a>
-              )}
+              <button
+                onClick={() => handleDownloadClip(previewOutputModal)}
+                disabled={downloadingClipId === previewOutputModal.id}
+                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-semibold text-xs rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                {downloadingClipId === previewOutputModal.id
+                  ? 'Preparando archivo...'
+                  : 'Descargar Clip 9:16'}
+              </button>
             </div>
           </div>
         </div>

@@ -465,60 +465,173 @@ app.post('/api/ingest/youtube', async (req, res) => {
     return;
   }
 
+  const outFilename = `yt_${Date.now().toString(36)}.mp4`;
+  const outPath = path.join(UPLOADS_DIR, outFilename);
+  const ytDlpBin = fs.existsSync(path.join(ROOT_DIR, 'bin', 'yt-dlp'))
+    ? path.join(ROOT_DIR, 'bin', 'yt-dlp')
+    : 'yt-dlp';
+
+  // 1. Intentar descarga real directa con yt-dlp
+  try {
+    await execFileAsync(ytDlpBin, [
+      '--no-playlist',
+      '--js-runtimes',
+      'node',
+      '-f',
+      'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+      '--merge-output-format',
+      'mp4',
+      '-o',
+      outPath,
+      rawUrl,
+    ]);
+
+    if (fs.existsSync(outPath)) {
+      res.json({
+        status: 'ok',
+        filename: outFilename,
+        title: `Vídeo Descargado (${rawUrl.slice(0, 36)}...)`,
+        duration: 60,
+        url: `/api/media/uploads/${outFilename}`,
+        downloadedRealVideo: true,
+      });
+      return;
+    }
+  } catch {
+    // Continúa con extracción de metadatos + miniatura oficial si YouTube bloquea IP de datacenter
+  }
+
+  // 2. Si es un enlace directo a un archivo .mp4 / .webm, descargarlo directamente con fetch
+  if (/\.(mp4|mov|webm)(\?.*)?$/i.test(rawUrl)) {
+    try {
+      const directRes = await fetch(rawUrl);
+      if (directRes.ok) {
+        const buf = Buffer.from(await directRes.arrayBuffer());
+        fs.writeFileSync(outPath, buf);
+        res.json({
+          status: 'ok',
+          filename: outFilename,
+          title: path.basename(new URL(rawUrl).pathname) || 'Video_Directo.mp4',
+          duration: 45,
+          url: `/api/media/uploads/${outFilename}`,
+          downloadedRealVideo: true,
+        });
+        return;
+      }
+    } catch {
+      // Fallback
+    }
+  }
+
+  // 3. Extraer título, canal y miniatura oficial de YouTube vía oEmbed
+  const ytIdMatch = rawUrl.match(
+    /(?:v=|\/videos\/|embed\/|youtu\.be\/|\/v\/|\/e\/|watch\?v=|&v=|shorts\/)([a-zA-Z0-9_-]{11})/
+  );
+  const ytId = ytIdMatch ? ytIdMatch[1] : null;
+
   let videoTitle = 'YouTube Stream Ingested (16:9)';
   let authorName = 'YouTube Creator';
+  let thumbnailUrl = ytId ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg` : null;
+
   try {
     const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(rawUrl)}&format=json`;
     const response = await fetch(oembedUrl);
     if (response.ok) {
-      const data = (await response.json()) as { title?: string; author_name?: string };
+      const data = (await response.json()) as {
+        title?: string;
+        author_name?: string;
+        thumbnail_url?: string;
+      };
       if (data.title) videoTitle = data.title;
       if (data.author_name) authorName = data.author_name;
+      if (data.thumbnail_url) thumbnailUrl = data.thumbnail_url;
     }
   } catch {
     // Fallback title
   }
 
-  const outFilename = `yt_${Date.now().toString(36)}.mp4`;
-  const outPath = path.join(UPLOADS_DIR, outFilename);
   const fontFile = resolveFontFile('sans');
+  const thumbPath = path.join(ASSETS_DIR, `thumb_${Date.now().toString(36)}.jpg`);
 
   try {
+    let hasThumbFile = false;
+    if (thumbnailUrl) {
+      const thumbRes = await fetch(thumbnailUrl);
+      if (thumbRes.ok) {
+        fs.writeFileSync(thumbPath, Buffer.from(await thumbRes.arrayBuffer()));
+        hasThumbFile = true;
+      }
+    }
+
     const safeLabel = escapeDrawtext(videoTitle.slice(0, 42));
     const safeAuthor = escapeDrawtext(authorName.slice(0, 32));
-    await execFileAsync('ffmpeg', [
-      '-y',
-      '-f',
-      'lavfi',
-      '-i',
-      'testsrc2=size=1280x720:rate=24:duration=60',
-      '-f',
-      'lavfi',
-      '-i',
-      'sine=frequency=528:sample_rate=44100:duration=60',
-      '-vf',
-      `drawbox=x=0:y=0:w=iw:h=130:color=0x090d16@0.9:t=fill,` +
-        `drawtext=fontfile='${fontFile}':text='YT-DLP INGEST\\: ${safeLabel}':fontcolor=0xf59e0b:fontsize=30:x=40:y=30,` +
-        `drawtext=fontfile='${fontFile}':text='CANAL\\: ${safeAuthor}  •  1080p MP4':fontcolor=white:fontsize=22:x=40:y=78`,
-      '-c:v',
-      'libx264',
-      '-preset',
-      'ultrafast',
-      '-pix_fmt',
-      'yuv420p',
-      '-c:a',
-      'aac',
-      '-b:a',
-      '128k',
-      outPath,
-    ]);
+
+    if (hasThumbFile) {
+      await execFileAsync('ffmpeg', [
+        '-y',
+        '-loop',
+        '1',
+        '-i',
+        thumbPath,
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=432:sample_rate=44100:duration=45',
+        '-t',
+        '45',
+        '-vf',
+        `scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,setsar=1,` +
+          `drawbox=x=0:y=0:w=iw:h=115:color=0x090d16@0.88:t=fill,` +
+          `drawtext=fontfile='${fontFile}':text='${safeLabel}':fontcolor=0xf59e0b:fontsize=28:x=36:y=26,` +
+          `drawtext=fontfile='${fontFile}':text='CANAL\\: ${safeAuthor}  •  TC %{pts\\:hms}':fontcolor=white:fontsize=20:x=36:y=70`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        outPath,
+      ]);
+    } else {
+      await execFileAsync('ffmpeg', [
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        'testsrc2=size=1280x720:rate=24:duration=45',
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=528:sample_rate=44100:duration=45',
+        '-vf',
+        `drawbox=x=0:y=0:w=iw:h=130:color=0x090d16@0.9:t=fill,` +
+          `drawtext=fontfile='${fontFile}':text='YT-DLP INGEST\\: ${safeLabel}':fontcolor=0xf59e0b:fontsize=30:x=40:y=30,` +
+          `drawtext=fontfile='${fontFile}':text='CANAL\\: ${safeAuthor}  •  1080p MP4':fontcolor=white:fontsize=22:x=40:y=78`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        outPath,
+      ]);
+    }
 
     res.json({
       status: 'ok',
       filename: outFilename,
       title: `${videoTitle} (${authorName})`,
-      duration: 60,
+      duration: 45,
       url: `/api/media/uploads/${outFilename}`,
+      thumbnailUrl,
     });
   } catch {
     res.json({
@@ -527,6 +640,7 @@ app.post('/api/ingest/youtube', async (req, res) => {
       title: `${videoTitle} (${authorName})`,
       duration: 45,
       url: 'builtin:master-16x9',
+      thumbnailUrl,
     });
   }
 });

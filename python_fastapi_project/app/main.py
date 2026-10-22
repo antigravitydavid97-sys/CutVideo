@@ -1,8 +1,12 @@
 import os
+import re
 import sys
 import uuid
 import shutil
+import base64
 import logging
+import urllib.request
+import json
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -12,7 +16,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from pydantic import BaseModel, Field
 
 from app.ffmpeg_engine import build_ffmpeg_command, run_ffmpeg_render
@@ -42,6 +46,17 @@ JOBS_STORE: Dict[str, Dict[str, Any]] = {}
 
 def has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
+
+
+def extract_youtube_id(url: str) -> Optional[str]:
+    patterns = [
+        r"(?:v=|\/videos\/|embed\/|youtu\.be\/|\/v\/|\/e\/|watch\?v=|&v=|shorts\/)([a-zA-Z0-9_-]{11})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
 
 
 class ClipRange(BaseModel):
@@ -169,7 +184,7 @@ async def studio_init():
 
 
 @app.get("/api/media/{folder}/{filename}")
-async def serve_media(folder: str, filename: str):
+async def serve_media(folder: str, filename: str, download: int = 0):
     safe_name = Path(filename).name
     folder_map = {
         "uploads": UPLOADS_DIR,
@@ -182,59 +197,100 @@ async def serve_media(folder: str, filename: str):
     target = base / safe_name
     if not target.exists():
         raise HTTPException(status_code=404, detail="Archivo no encontrado.")
+    if download == 1:
+        return FileResponse(
+            path=str(target),
+            media_type="video/mp4",
+            filename=safe_name,
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        )
     return FileResponse(path=str(target))
 
 
 @app.post("/api/ingest/youtube")
 async def ingest_youtube(payload: YouTubeIngestRequest):
-    if not has_ffmpeg():
-        # En entorno serverless sin binario FFmpeg local, devolvemos metadatos para previsualización en cliente
-        return {
-            "status": "ok",
-            "filename": "yt_stream_16x9.mp4",
-            "title": f"YouTube Stream ({payload.url[:36]}...)",
-            "duration": 45,
-            "url": "builtin:master-16x9",
-            "video_url": "builtin:master-16x9",
-        }
+    """
+    Intenta descargar el vídeo con yt-dlp (usando formato progresivo MP4 si no hay ffmpeg).
+    Si YouTube bloquea la IP del centro de datos (Vercel/Cloud), extrae metadatos reales y miniatura vía oEmbed.
+    """
+    raw_url = payload.url.strip()
+    video_uid = uuid.uuid4().hex[:10]
+    output_template = str(UPLOADS_DIR / f"yt_{video_uid}.%(ext)s")
 
-    import yt_dlp
+    # Si no hay ffmpeg en el contenedor serverless, pedimos MP4 progresivo pre-mezclado (no requiere merge)
+    fmt_selector = (
+        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+        if has_ffmpeg()
+        else "best[ext=mp4]/18/best"
+    )
 
-    video_id = uuid.uuid4().hex[:10]
-    output_template = str(UPLOADS_DIR / f"yt_{video_id}.%(ext)s")
-
-    ydl_opts = {
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "merge_output_format": "mp4",
+    ydl_opts: Dict[str, Any] = {
+        "format": fmt_selector,
         "outtmpl": output_template,
         "noplaylist": True,
         "quiet": True,
+        "no_warnings": True,
+        "extractor_args": {"youtube": {"player_client": ["ios", "android", "web"]}},
     }
+    if has_ffmpeg():
+        ydl_opts["merge_output_format"] = "mp4"
 
     try:
+        import yt_dlp
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(payload.url, download=True)
-            title = info.get("title", f"YouTube_{video_id}")
-            duration = info.get("duration", 0)
-            final_path = UPLOADS_DIR / f"yt_{video_id}.mp4"
+            info = ydl.extract_info(raw_url, download=True)
+            title = info.get("title", f"Video_{video_uid}")
+            duration = info.get("duration", 45)
+            final_path = UPLOADS_DIR / f"yt_{video_uid}.mp4"
 
             if not final_path.exists():
-                matches = list(UPLOADS_DIR.glob(f"yt_{video_id}.*"))
-                if not matches:
-                    raise HTTPException(status_code=500, detail="No se encontró el archivo descargado por yt-dlp.")
-                final_path = matches[0]
+                matches = list(UPLOADS_DIR.glob(f"yt_{video_uid}.*"))
+                if matches:
+                    final_path = matches[0]
 
-        return {
-            "status": "ok",
-            "filename": final_path.name,
-            "title": title,
-            "duration": duration,
-            "url": f"/api/media/uploads/{final_path.name}",
-            "video_url": f"/api/media/uploads/{final_path.name}",
-        }
+            if final_path.exists():
+                return {
+                    "status": "ok",
+                    "filename": final_path.name,
+                    "title": title,
+                    "duration": duration,
+                    "url": f"/api/media/uploads/{final_path.name}",
+                    "video_url": f"/api/media/uploads/{final_path.name}",
+                    "downloadedRealVideo": True,
+                }
     except Exception as exc:
-        logger.exception("Error descargando desde YouTube")
-        raise HTTPException(status_code=400, detail=f"Error en yt-dlp: {str(exc)}")
+        logger.warning("yt-dlp directo falló (%s), usando oEmbed/miniatura de respaldo", exc)
+
+    # Fallback con metadatos reales de YouTube oEmbed + Miniatura HD cuando la IP datacenter requiere captcha
+    yt_id = extract_youtube_id(raw_url)
+    video_title = f"YouTube Video ({yt_id or raw_url[:28]})"
+    author_name = "YouTube"
+    thumbnail_url = f"https://i.ytimg.com/vi/{yt_id}/hqdefault.jpg" if yt_id else None
+
+    try:
+        oembed_endpoint = f"https://www.youtube.com/oembed?url={ urllib.parse.quote(raw_url) }&format=json"
+        req = urllib.request.Request(oembed_endpoint, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                video_title = data.get("title") or video_title
+                author_name = data.get("author_name") or author_name
+                thumbnail_url = data.get("thumbnail_url") or thumbnail_url
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "filename": f"yt_{yt_id or video_uid}.mp4",
+        "title": f"{video_title} ({author_name})",
+        "duration": 45,
+        "url": "builtin:master-16x9",
+        "video_url": "builtin:master-16x9",
+        "thumbnailUrl": thumbnail_url,
+        "youtubeBlockedIp": True,
+        "notice": "YouTube bloqueó la descarga directa desde la IP serverless (anti-bot). Se han cargado el título y miniatura del vídeo; para editar el MP4 original en la nube, súbelo en la pestaña 'Archivo Local' o ejecuta el backend en tu máquina local.",
+    }
 
 
 @app.post("/api/ingest/upload")
@@ -396,7 +452,12 @@ async def download_clip(filename: str):
     file_path = OUTPUTS_DIR / Path(filename).name
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Archivo no encontrado.")
-    return FileResponse(path=str(file_path), media_type="video/mp4", filename=file_path.name)
+    return FileResponse(
+        path=str(file_path),
+        media_type="video/mp4",
+        filename=file_path.name,
+        headers={"Content-Disposition": f'attachment; filename="{file_path.name}"'},
+    )
 
 
 @app.get("/api/python-project/files")
