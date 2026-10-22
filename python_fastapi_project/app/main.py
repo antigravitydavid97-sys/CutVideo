@@ -18,12 +18,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("verticlip.api")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOADS_DIR = BASE_DIR / "storage" / "uploads"
-OUTPUTS_DIR = BASE_DIR / "storage" / "outputs"
-ASSETS_DIR = BASE_DIR / "storage" / "assets"
+# En Vercel el sistema de archivos /var/task es de solo lectura; usamos /tmp para escritura
+STORAGE_ROOT = Path("/tmp/verticlip_storage") if os.environ.get("VERCEL") else (BASE_DIR / "storage")
+UPLOADS_DIR = STORAGE_ROOT / "uploads"
+OUTPUTS_DIR = STORAGE_ROOT / "outputs"
+ASSETS_DIR = STORAGE_ROOT / "assets"
 
 for directory in (UPLOADS_DIR, OUTPUTS_DIR, ASSETS_DIR):
-    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
 
 app = FastAPI(
     title="VertiClip Studio API",
@@ -31,9 +36,9 @@ app = FastAPI(
     version="1.0.0",
 )
 
-app.mount("/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="outputs")
-app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
-app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
+app.mount("/outputs", StaticFiles(directory=str(OUTPUTS_DIR), check_dir=False), name="outputs")
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR), check_dir=False), name="uploads")
+app.mount("/media-assets", StaticFiles(directory=str(ASSETS_DIR), check_dir=False), name="media-assets")
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
 
 # Almacén en memoria para estado de colas de renderizado
@@ -146,12 +151,12 @@ async def studio_init():
         "defaultSecondary": {
             "filename": "satisfying_loop_secondary.mp4",
             "title": "Loop Visual Secundario (Mandelbrot Synth)",
-            "url": "/assets/satisfying_loop_secondary.mp4",
+            "url": "/media-assets/satisfying_loop_secondary.mp4",
         },
         "defaultWatermark": {
             "filename": "verticlip_badge.png",
             "title": "Logo PNG Transparente (VertiClip Badge)",
-            "url": "/assets/verticlip_badge.png",
+            "url": "/media-assets/verticlip_badge.png",
         },
     }
 
@@ -212,7 +217,7 @@ async def upload_file(
         raise HTTPException(status_code=400, detail=f"Extensión no soportada: {ext}")
 
     target_dir = UPLOADS_DIR if asset_type == "source_video" else ASSETS_DIR
-    base_route = "/uploads" if asset_type == "source_video" else "/assets"
+    base_route = "/uploads" if asset_type == "source_video" else "/media-assets"
     safe_name = f"{asset_type}_{uuid.uuid4().hex[:8]}{ext}"
     dest_path = target_dir / safe_name
 

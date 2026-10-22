@@ -71,7 +71,7 @@ export default function App() {
   const [secondaryMedia, setSecondaryMedia] = useState({
     filename: 'satisfying_loop_secondary.mp4',
     title: 'Loop Visual Secundario (Mandelbrot Synth)',
-    url: '/assets/satisfying_loop_secondary.mp4',
+    url: '/media-assets/satisfying_loop_secondary.mp4',
     isImage: false,
   });
 
@@ -79,7 +79,7 @@ export default function App() {
     enabled: true,
     filename: 'verticlip_badge.png',
     title: 'Logo PNG Transparente (VertiClip Badge)',
-    url: '/assets/verticlip_badge.png',
+    url: '/media-assets/verticlip_badge.png',
     position: 'top-right' as WatermarkPosition,
     scale: 0.22,
   });
@@ -117,8 +117,9 @@ export default function App() {
   // Initialize default studio assets from backend
   useEffect(() => {
     fetch('/api/studio/init')
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
+        if (!data) return;
         if (data.defaultSource) setSourceVideo(data.defaultSource);
         if (data.defaultSecondary) {
           setSecondaryMedia({

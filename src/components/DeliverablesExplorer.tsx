@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Copy, Check, Download, FolderTree, Terminal, FileCode } from 'lucide-react';
+import { DEFAULT_PYTHON_FILES } from '../data/pythonDeliverables';
 
 interface PythonFilesResponse {
   requirements: string;
@@ -62,19 +63,23 @@ interface DeliverablesExplorerProps {
 }
 
 export const DeliverablesExplorer: React.FC<DeliverablesExplorerProps> = ({ activeSection }) => {
-  const [pyFiles, setPyFiles] = useState<PythonFilesResponse>({
-    requirements: '',
-    ffmpegEngine: '',
-    mainPy: '',
-    indexHtml: '',
-  });
+  const [pyFiles, setPyFiles] = useState<PythonFilesResponse>(DEFAULT_PYTHON_FILES);
   const [selectedFileTab, setSelectedFileTab] = useState<'mainPy' | 'ffmpegEngine' | 'indexHtml' | 'requirements'>('ffmpegEngine');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/python-project/files')
-      .then((r) => r.json())
-      .then((data) => setPyFiles(data))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && typeof data.ffmpegEngine === 'string' && data.ffmpegEngine.length > 0) {
+          setPyFiles({
+            requirements: data.requirements || DEFAULT_PYTHON_FILES.requirements,
+            ffmpegEngine: data.ffmpegEngine || DEFAULT_PYTHON_FILES.ffmpegEngine,
+            mainPy: data.mainPy || DEFAULT_PYTHON_FILES.mainPy,
+            indexHtml: data.indexHtml || DEFAULT_PYTHON_FILES.indexHtml,
+          });
+        }
+      })
       .catch(() => {});
   }, []);
 

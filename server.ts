@@ -412,7 +412,7 @@ async function startServer() {
   });
 
   app.use('/uploads', express.static(UPLOADS_DIR));
-  app.use('/assets', express.static(ASSETS_DIR));
+  app.use('/media-assets', express.static(ASSETS_DIR));
   app.use('/outputs', express.static(OUTPUTS_DIR));
 
   // Health & default assets endpoint
@@ -427,12 +427,12 @@ async function startServer() {
       defaultSecondary: {
         filename: 'satisfying_loop_secondary.mp4',
         title: 'Loop Visual Secundario (Mandelbrot Synth)',
-        url: '/assets/satisfying_loop_secondary.mp4',
+        url: '/media-assets/satisfying_loop_secondary.mp4',
       },
       defaultWatermark: {
         filename: 'verticlip_badge.png',
         title: 'Logo PNG Transparente (VertiClip Badge)',
-        url: '/assets/verticlip_badge.png',
+        url: '/media-assets/verticlip_badge.png',
       },
     });
   });
@@ -444,7 +444,7 @@ async function startServer() {
       return;
     }
     const assetType = req.body?.asset_type || 'source_video';
-    const baseRoute = assetType === 'source_video' ? '/uploads' : '/assets';
+    const baseRoute = assetType === 'source_video' ? '/uploads' : '/media-assets';
     res.json({
       status: 'ok',
       assetType,
