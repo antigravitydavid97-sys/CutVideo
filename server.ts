@@ -371,6 +371,46 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
 
+  // If Vercel Services injects the internal binding URL (PYTHON_FASTAPI_URL),
+  // forward API requests from the 'app' service to 'python_fastapi_project'
+  app.use('/api', async (req, res, next) => {
+    const boundFastApiUrl = process.env.PYTHON_FASTAPI_URL;
+    if (!boundFastApiUrl) {
+      next();
+      return;
+    }
+
+    try {
+      const targetUrl = new URL(req.originalUrl, boundFastApiUrl);
+      const headers = new Headers();
+      if (req.headers['content-type']) {
+        headers.set('content-type', String(req.headers['content-type']));
+      }
+
+      const init: RequestInit = {
+        method: req.method,
+        headers,
+      };
+
+      if (req.method !== 'GET' && req.method !== 'HEAD' && req.body && Object.keys(req.body).length > 0) {
+        init.body = JSON.stringify(req.body);
+      }
+
+      const upstreamRes = await fetch(targetUrl, init);
+      res.status(upstreamRes.status);
+      upstreamRes.headers.forEach((value, key) => {
+        if (key.toLowerCase() !== 'transfer-encoding') {
+          res.setHeader(key, value);
+        }
+      });
+      const arrayBuffer = await upstreamRes.arrayBuffer();
+      res.send(Buffer.from(arrayBuffer));
+    } catch (err) {
+      console.error('Error llamando al servicio interno PYTHON_FASTAPI_URL, usando motor local:', err);
+      next();
+    }
+  });
+
   app.use('/uploads', express.static(UPLOADS_DIR));
   app.use('/assets', express.static(ASSETS_DIR));
   app.use('/outputs', express.static(OUTPUTS_DIR));

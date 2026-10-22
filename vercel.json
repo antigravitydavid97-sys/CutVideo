@@ -1,0 +1,54 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "app": {
+      "root": ".",
+      "framework": "vite",
+      "bindings": [
+        {
+          "type": "service",
+          "service": "python_fastapi_project",
+          "format": "url",
+          "env": "PYTHON_FASTAPI_URL"
+        }
+      ]
+    },
+    "python_fastapi_project": {
+      "root": "python_fastapi_project",
+      "framework": "fastapi",
+      "entrypoint": "app/main.py"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": {
+        "service": "python_fastapi_project"
+      }
+    },
+    {
+      "source": "/uploads/(.*)",
+      "destination": {
+        "service": "python_fastapi_project"
+      }
+    },
+    {
+      "source": "/assets/(.*)",
+      "destination": {
+        "service": "python_fastapi_project"
+      }
+    },
+    {
+      "source": "/outputs/(.*)",
+      "destination": {
+        "service": "python_fastapi_project"
+      }
+    },
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "app"
+      }
+    }
+  ]
+}
