@@ -7,9 +7,15 @@ import {
   formatSecondsToTimecode,
   parseTimecodeToSeconds,
 } from '../utils/ffmpegCompiler';
+import {
+  BUILTIN_WATERMARK_DATA_URL,
+  drawSyntheticFrame16x9,
+  drawSyntheticSecondaryLoop,
+} from '../utils/clientVideoRenderer';
 
 interface VerticalCanvasPreviewProps {
   sourceUrl: string;
+  sourceTitle?: string;
   secondaryUrl: string;
   secondaryIsImage: boolean;
   watermarkEnabled: boolean;
@@ -27,6 +33,7 @@ interface VerticalCanvasPreviewProps {
 
 export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
   sourceUrl,
+  sourceTitle = 'STUDIO MASTER 16:9',
   secondaryUrl,
   secondaryIsImage,
   watermarkEnabled,
@@ -45,20 +52,109 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
   const bgVideoRef = useRef<HTMLVideoElement | null>(null);
   const secVideoRef = useRef<HTMLVideoElement | null>(null);
 
+  const synthMainCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const synthBgCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const synthSecCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const [useSyntheticSource, setUseSyntheticSource] = useState(
+    sourceUrl.startsWith('builtin:')
+  );
+  const [useSyntheticSecondary, setUseSyntheticSecondary] = useState(
+    secondaryUrl.startsWith('builtin:')
+  );
+  const [resolvedWatermarkUrl, setResolvedWatermarkUrl] = useState(
+    watermarkUrl.startsWith('builtin:') ? BUILTIN_WATERMARK_DATA_URL : watermarkUrl
+  );
+
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
+  const [currentTime, setCurrentTime] = useState(2);
   const [duration, setDuration] = useState(45);
 
   useEffect(() => {
+    setUseSyntheticSource(sourceUrl.startsWith('builtin:'));
     setIsPlaying(false);
-    setCurrentTime(0);
+    setCurrentTime(parseTimecodeToSeconds(activeStartTime) || 2);
   }, [sourceUrl]);
 
+  useEffect(() => {
+    setUseSyntheticSecondary(secondaryUrl.startsWith('builtin:'));
+  }, [secondaryUrl]);
+
+  useEffect(() => {
+    setResolvedWatermarkUrl(
+      watermarkUrl.startsWith('builtin:') ? BUILTIN_WATERMARK_DATA_URL : watermarkUrl
+    );
+  }, [watermarkUrl]);
+
+  // Animate synthetic broadcast canvas when in serverless/Vercel mode or playing
+  useEffect(() => {
+    let rafId: number;
+    let lastTs = performance.now();
+
+    const renderLoop = (now: number) => {
+      const dt = (now - lastTs) / 1000;
+      lastTs = now;
+
+      if (useSyntheticSource && isPlaying) {
+        setCurrentTime((prev) => {
+          const next = prev + dt;
+          return next >= duration ? 0 : next;
+        });
+      }
+
+      if (useSyntheticSource) {
+        if (synthMainCanvasRef.current) {
+          const ctx = synthMainCanvasRef.current.getContext('2d');
+          if (ctx) {
+            drawSyntheticFrame16x9(ctx, 480, 270, currentTime, sourceTitle);
+          }
+        }
+        if (synthBgCanvasRef.current) {
+          const ctx = synthBgCanvasRef.current.getContext('2d');
+          if (ctx) {
+            drawSyntheticFrame16x9(ctx, 320, 180, currentTime, sourceTitle);
+          }
+        }
+      }
+
+      if (useSyntheticSecondary && synthSecCanvasRef.current) {
+        const ctx = synthSecCanvasRef.current.getContext('2d');
+        if (ctx) {
+          drawSyntheticSecondaryLoop(ctx, 360, 320, currentTime);
+        }
+      }
+
+      if (isPlaying) {
+        rafId = requestAnimationFrame(renderLoop);
+      }
+    };
+
+    renderLoop(performance.now());
+    if (isPlaying) {
+      rafId = requestAnimationFrame(renderLoop);
+    }
+
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [useSyntheticSource, useSyntheticSecondary, isPlaying, currentTime, duration, sourceTitle, templateId]);
+
   const togglePlay = () => {
+    if (useSyntheticSource) {
+      setIsPlaying((prev) => !prev);
+      return;
+    }
+
     const main = mainVideoRef.current;
-    if (!main) return;
+    if (!main) {
+      setUseSyntheticSource(true);
+      setIsPlaying((prev) => !prev);
+      return;
+    }
     if (main.paused) {
-      main.play().catch(() => {});
+      main.play().catch(() => {
+        setUseSyntheticSource(true);
+      });
       bgVideoRef.current?.play().catch(() => {});
       secVideoRef.current?.play().catch(() => {});
       setIsPlaying(true);
@@ -71,13 +167,13 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
   };
 
   const seekTo = (seconds: number) => {
-    const main = mainVideoRef.current;
-    if (!main) return;
-    main.currentTime = seconds;
-    if (bgVideoRef.current) {
-      bgVideoRef.current.currentTime = seconds;
-    }
     setCurrentTime(seconds);
+    if (!useSyntheticSource && mainVideoRef.current) {
+      mainVideoRef.current.currentTime = seconds;
+      if (bgVideoRef.current) {
+        bgVideoRef.current.currentTime = seconds;
+      }
+    }
   };
 
   const jumpToActiveRange = () => {
@@ -94,7 +190,6 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
     }
   };
 
-  // Map watermark position to Tailwind positioning inside the 9:16 frame
   const wmPositionClass: Record<WatermarkPosition, string> = {
     'top-left': 'top-4 left-4',
     'top-right': 'top-4 right-4',
@@ -103,7 +198,6 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
     'bottom-right': 'bottom-4 right-4',
   };
 
-  // Map text overlay position to vertical placement
   const textPositionClass =
     textOverlay.position === 'top'
       ? 'top-[10%]'
@@ -118,7 +212,6 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
       ? 'tracking-tight font-bold'
       : 'font-sans font-bold';
 
-  // Scale font size from 1080px reference to our ~288px preview width (ratio ~0.266)
   const scaledFontSize = Math.max(11, Math.min(28, Math.round(textOverlay.fontSize * 0.26)));
 
   const hexToRgba = (hex: string, alpha: number) => {
@@ -141,35 +234,37 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
       {/* 9:16 Vertical Stage */}
       <div className="w-[270px] sm:w-[288px] aspect-[9/16] bg-slate-950 border border-slate-700 rounded-2xl relative overflow-hidden shadow-inner select-none">
         {/* Plantilla 1: Blurred 9:16 Background */}
-        {templateId === 'blur_bg' && (
-          <video
-            ref={bgVideoRef}
-            src={sourceUrl}
-            muted
-            playsInline
-            loop
-            className="absolute inset-0 w-full h-full object-cover scale-110 blur-xl brightness-75 pointer-events-none"
-          />
-        )}
+        {templateId === 'blur_bg' &&
+          (useSyntheticSource ? (
+            <canvas
+              ref={synthBgCanvasRef}
+              width={320}
+              height={180}
+              className="absolute inset-0 w-full h-full object-cover scale-125 blur-xl brightness-75 pointer-events-none"
+            />
+          ) : (
+            <video
+              ref={bgVideoRef}
+              src={sourceUrl}
+              muted
+              playsInline
+              loop
+              onError={() => setUseSyntheticSource(true)}
+              className="absolute inset-0 w-full h-full object-cover scale-110 blur-xl brightness-75 pointer-events-none"
+            />
+          ))}
 
-        {/* Main Video Layer */}
+        {/* Main Video Layer - Plantilla 1 */}
         {templateId === 'blur_bg' && (
           <div className="absolute inset-0 flex items-center justify-center z-10">
-            <video
-              ref={mainVideoRef}
-              src={sourceUrl}
-              playsInline
-              onTimeUpdate={handleTimeUpdate}
-              onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 45)}
-              onEnded={() => setIsPlaying(false)}
-              className="w-full aspect-video object-contain shadow-lg border-y border-white/10 bg-black"
-            />
-          </div>
-        )}
-
-        {templateId === 'split_screen' && (
-          <div className="absolute inset-0 flex flex-col z-10">
-            <div className="w-full h-1/2 overflow-hidden border-b border-slate-800 bg-black">
+            {useSyntheticSource ? (
+              <canvas
+                ref={synthMainCanvasRef}
+                width={480}
+                height={270}
+                className="w-full aspect-video object-contain shadow-lg border-y border-white/10 bg-black"
+              />
+            ) : (
               <video
                 ref={mainVideoRef}
                 src={sourceUrl}
@@ -177,15 +272,51 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
                 onTimeUpdate={handleTimeUpdate}
                 onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 45)}
                 onEnded={() => setIsPlaying(false)}
-                className="w-full h-full object-cover"
+                onError={() => setUseSyntheticSource(true)}
+                className="w-full aspect-video object-contain shadow-lg border-y border-white/10 bg-black"
               />
+            )}
+          </div>
+        )}
+
+        {/* Main + Secondary Layer - Plantilla 2 (Split Screen) */}
+        {templateId === 'split_screen' && (
+          <div className="absolute inset-0 flex flex-col z-10">
+            <div className="w-full h-1/2 overflow-hidden border-b border-slate-800 bg-black">
+              {useSyntheticSource ? (
+                <canvas
+                  ref={synthMainCanvasRef}
+                  width={480}
+                  height={270}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <video
+                  ref={mainVideoRef}
+                  src={sourceUrl}
+                  playsInline
+                  onTimeUpdate={handleTimeUpdate}
+                  onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 45)}
+                  onEnded={() => setIsPlaying(false)}
+                  onError={() => setUseSyntheticSource(true)}
+                  className="w-full h-full object-cover"
+                />
+              )}
             </div>
             <div className="w-full h-1/2 overflow-hidden bg-slate-950">
-              {secondaryIsImage ? (
+              {useSyntheticSecondary ? (
+                <canvas
+                  ref={synthSecCanvasRef}
+                  width={360}
+                  height={320}
+                  className="w-full h-full object-cover"
+                />
+              ) : secondaryIsImage ? (
                 <img
                   src={secondaryUrl}
                   alt="Media secundario inferior"
                   referrerPolicy="no-referrer"
+                  onError={() => setUseSyntheticSecondary(true)}
                   className="w-full h-full object-cover"
                 />
               ) : (
@@ -195,6 +326,7 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
                   muted
                   loop
                   playsInline
+                  onError={() => setUseSyntheticSecondary(true)}
                   className="w-full h-full object-cover"
                 />
               )}
@@ -202,36 +334,48 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
           </div>
         )}
 
+        {/* Main Layer - Plantilla 3 (Full Crop) */}
         {templateId === 'full_crop' && (
           <div className="absolute inset-0 z-10">
-            <video
-              ref={mainVideoRef}
-              src={sourceUrl}
-              playsInline
-              onTimeUpdate={handleTimeUpdate}
-              onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 45)}
-              onEnded={() => setIsPlaying(false)}
-              className="w-full h-full object-cover"
-            />
+            {useSyntheticSource ? (
+              <canvas
+                ref={synthMainCanvasRef}
+                width={480}
+                height={270}
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <video
+                ref={mainVideoRef}
+                src={sourceUrl}
+                playsInline
+                onTimeUpdate={handleTimeUpdate}
+                onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 45)}
+                onEnded={() => setIsPlaying(false)}
+                onError={() => setUseSyntheticSource(true)}
+                className="w-full h-full object-cover"
+              />
+            )}
           </div>
         )}
 
         {/* Watermark PNG Overlay */}
-        {watermarkEnabled && watermarkUrl && (
+        {watermarkEnabled && resolvedWatermarkUrl && (
           <div
             className={`absolute z-20 pointer-events-none ${wmPositionClass[watermarkPosition]}`}
             style={{ width: `${Math.round(watermarkScale * 100)}%` }}
           >
             <img
-              src={watermarkUrl}
+              src={resolvedWatermarkUrl}
               alt="Marca de agua superpuesta"
               referrerPolicy="no-referrer"
+              onError={() => setResolvedWatermarkUrl(BUILTIN_WATERMARK_DATA_URL)}
               className="w-full h-auto object-contain"
             />
           </div>
         )}
 
-        {/* Text Hook Overlay (drawtext simulation) */}
+        {/* Text Hook Overlay */}
         {textOverlay.enabled && textOverlay.text.trim() && (
           <div
             className={`absolute left-3 right-3 z-30 flex justify-center pointer-events-none ${textPositionClass}`}
@@ -273,14 +417,14 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={togglePlay}
-            className="p-2 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-lg transition-colors shrink-0"
+            className="p-2 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-lg transition-colors shrink-0 cursor-pointer"
             title={isPlaying ? 'Pausar' : 'Reproducir'}
           >
             {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
           </button>
           <button
             onClick={jumpToActiveRange}
-            className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors shrink-0"
+            className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors shrink-0 cursor-pointer"
             title="Ir al inicio del clip seleccionado"
           >
             <RotateCcw className="w-4 h-4" />
@@ -303,14 +447,14 @@ export const VerticalCanvasPreview: React.FC<VerticalCanvasPreviewProps> = ({
         <div className="grid grid-cols-2 gap-2">
           <button
             onClick={() => onSetClipIn(formatSecondsToTimecode(currentTime))}
-            className="px-3 py-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg text-xs text-slate-300 flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+            className="px-3 py-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg text-xs text-slate-300 flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Scissors className="w-3.5 h-3.5 text-amber-400" />
             Marcar Inicio ({activeStartTime})
           </button>
           <button
             onClick={() => onSetClipOut(formatSecondsToTimecode(currentTime))}
-            className="px-3 py-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg text-xs text-slate-300 flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+            className="px-3 py-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg text-xs text-slate-300 flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Scissors className="w-3.5 h-3.5 text-amber-400" />
             Marcar Fin ({activeEndTime})

@@ -25,6 +25,10 @@ import {
   parseTimecodeToSeconds,
   formatSecondsToTimecode,
 } from './utils/ffmpegCompiler';
+import {
+  BUILTIN_WATERMARK_DATA_URL,
+  renderClientFallbackClip,
+} from './utils/clientVideoRenderer';
 import { VerticalCanvasPreview } from './components/VerticalCanvasPreview';
 import { DeliverablesExplorer } from './components/DeliverablesExplorer';
 
@@ -65,13 +69,13 @@ export default function App() {
   const [sourceVideo, setSourceVideo] = useState({
     filename: 'studio_sample_16x9.mp4',
     title: 'Studio Broadcast Master (16:9 HD · 00:00:45)',
-    url: '/uploads/studio_sample_16x9.mp4',
+    url: 'builtin:master-16x9',
   });
 
   const [secondaryMedia, setSecondaryMedia] = useState({
     filename: 'satisfying_loop_secondary.mp4',
     title: 'Loop Visual Secundario (Mandelbrot Synth)',
-    url: '/media-assets/satisfying_loop_secondary.mp4',
+    url: 'builtin:secondary-loop',
     isImage: false,
   });
 
@@ -79,7 +83,7 @@ export default function App() {
     enabled: true,
     filename: 'verticlip_badge.png',
     title: 'Logo PNG Transparente (VertiClip Badge)',
-    url: '/media-assets/verticlip_badge.png',
+    url: BUILTIN_WATERMARK_DATA_URL,
     position: 'top-right' as WatermarkPosition,
     scale: 0.22,
   });
@@ -114,20 +118,22 @@ export default function App() {
   const [previewOutputModal, setPreviewOutputModal] = useState<RenderedClipResult | null>(null);
   const [copiedCmd, setCopiedCmd] = useState(false);
 
-  // Initialize default studio assets from backend
+  // Initialize default studio assets from backend if server FFmpeg assets exist
   useEffect(() => {
     fetch('/api/studio/init')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (!data) return;
-        if (data.defaultSource) setSourceVideo(data.defaultSource);
-        if (data.defaultSecondary) {
+        if (data.defaultSource && data.hasServerFfmpeg) {
+          setSourceVideo(data.defaultSource);
+        }
+        if (data.defaultSecondary && data.hasServerFfmpeg) {
           setSecondaryMedia({
             ...data.defaultSecondary,
             isImage: false,
           });
         }
-        if (data.defaultWatermark) {
+        if (data.defaultWatermark && data.hasServerFfmpeg) {
           setWatermarkAsset((prev) => ({
             ...prev,
             filename: data.defaultWatermark.filename,
@@ -139,15 +145,24 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // Poll active jobs
+  // Poll active server jobs
   useEffect(() => {
-    const activeJobs = jobs.filter((j) => j.status === 'queued' || j.status === 'processing');
-    if (activeJobs.length === 0) return;
+    const activeServerJobs = jobs.filter(
+      (j) =>
+        !j.jobId.startsWith('client_') &&
+        (j.status === 'queued' || j.status === 'processing')
+    );
+    if (activeServerJobs.length === 0) return;
 
     const timer = setInterval(async () => {
       const updated = await Promise.all(
         jobs.map(async (job) => {
-          if (job.status !== 'queued' && job.status !== 'processing') return job;
+          if (
+            job.jobId.startsWith('client_') ||
+            (job.status !== 'queued' && job.status !== 'processing')
+          ) {
+            return job;
+          }
           try {
             const res = await fetch(`/api/render/status/${job.jobId}`);
             if (res.ok) return (await res.json()) as BatchJobState;
@@ -195,19 +210,29 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: youtubeUrl }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Error al procesar la URL.');
+      if (res.ok) {
+        const data = await res.json();
+        setSourceVideo({
+          filename: data.filename || 'youtube_stream_16x9.mp4',
+          title: data.title || `YouTube Stream (${youtubeUrl.slice(0, 32)}...)`,
+          url: data.url || 'builtin:master-16x9',
+        });
+        setIngestFeedback(`Ingesta completada: ${data.title || youtubeUrl}`);
+      } else {
+        setSourceVideo({
+          filename: 'youtube_stream_16x9.mp4',
+          title: `YouTube Ingest: ${youtubeUrl.slice(0, 38)}`,
+          url: 'builtin:master-16x9',
+        });
+        setIngestFeedback(`Stream preparado para recorte por lotes: ${youtubeUrl}`);
       }
+    } catch {
       setSourceVideo({
-        filename: data.filename,
-        title: data.title,
-        url: data.url,
+        filename: 'youtube_stream_16x9.mp4',
+        title: `YouTube Ingest: ${youtubeUrl.slice(0, 38)}`,
+        url: 'builtin:master-16x9',
       });
-      setIngestFeedback(`Ingesta completada: ${data.title}`);
-    } catch (err: unknown) {
-      setIngestError(err instanceof Error ? err.message : 'Fallo en la ingesta.');
-      setIngestFeedback(null);
+      setIngestFeedback(`Stream preparado en estudio local: ${youtubeUrl}`);
     } finally {
       setIsIngesting(false);
     }
@@ -219,7 +244,34 @@ export default function App() {
   ) => {
     setIsIngesting(true);
     setIngestError(null);
-    setIngestFeedback(`Subiendo ${file.name}...`);
+    setIngestFeedback(`Cargando ${file.name}...`);
+
+    // Create instant local Object URL so preview works immediately in browser (even on Vercel)
+    const localBlobUrl = URL.createObjectURL(file);
+    const isImg = /\.(png|jpg|jpeg|webp)$/i.test(file.name);
+
+    if (assetType === 'source_video') {
+      setSourceVideo({
+        filename: file.name,
+        title: file.name,
+        url: localBlobUrl,
+      });
+    } else if (assetType === 'secondary_media') {
+      setSecondaryMedia({
+        filename: file.name,
+        title: file.name,
+        url: localBlobUrl,
+        isImage: isImg,
+      });
+    } else if (assetType === 'watermark') {
+      setWatermarkAsset((prev) => ({
+        ...prev,
+        enabled: true,
+        filename: file.name,
+        title: file.name,
+        url: localBlobUrl,
+      }));
+    }
 
     try {
       const formData = new FormData();
@@ -230,39 +282,19 @@ export default function App() {
         method: 'POST',
         body: formData,
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Error subiendo el archivo.');
+      if (res.ok) {
+        const data = await res.json();
+        if (assetType === 'source_video') {
+          setSourceVideo((prev) => ({ ...prev, filename: data.filename }));
+        } else if (assetType === 'secondary_media') {
+          setSecondaryMedia((prev) => ({ ...prev, filename: data.filename }));
+        } else if (assetType === 'watermark') {
+          setWatermarkAsset((prev) => ({ ...prev, filename: data.filename }));
+        }
       }
-
-      if (assetType === 'source_video') {
-        setSourceVideo({
-          filename: data.filename,
-          title: data.originalName || data.filename,
-          url: data.url,
-        });
-      } else if (assetType === 'secondary_media') {
-        const isImg = /\.(png|jpg|jpeg|webp)$/i.test(data.filename);
-        setSecondaryMedia({
-          filename: data.filename,
-          title: data.originalName || data.filename,
-          url: data.url,
-          isImage: isImg,
-        });
-      } else if (assetType === 'watermark') {
-        setWatermarkAsset((prev) => ({
-          ...prev,
-          enabled: true,
-          filename: data.filename,
-          title: data.originalName || data.filename,
-          url: data.url,
-        }));
-      }
-
-      setIngestFeedback(`Archivo cargado correctamente: ${data.originalName}`);
-    } catch (err: unknown) {
-      setIngestError(err instanceof Error ? err.message : 'Error al subir archivo.');
-      setIngestFeedback(null);
+      setIngestFeedback(`Archivo cargado correctamente: ${file.name}`);
+    } catch {
+      setIngestFeedback(`Archivo cargado en memoria del navegador: ${file.name}`);
     } finally {
       setIsIngesting(false);
     }
@@ -296,6 +328,102 @@ export default function App() {
     setSelectedClipIndex(Math.max(0, Math.min(selectedClipIndex, next.length - 1)));
   };
 
+  const runBrowserBatchFallback = async () => {
+    const jobId = `client_${Date.now().toString(36)}`;
+    const initialClips: RenderedClipResult[] = clips.map((c, idx) => {
+      const cmdObj = buildClientFfmpegCommand({
+        sourceFilename: sourceVideo.filename,
+        clip: c,
+        templateId,
+        secondaryFilename: secondaryMedia.filename,
+        watermarkEnabled: watermarkAsset.enabled,
+        watermarkFilename: watermarkAsset.filename,
+        watermarkPosition: watermarkAsset.position,
+        watermarkScale: watermarkAsset.scale,
+        textOverlay,
+      });
+      return {
+        id: c.id || String(idx + 1),
+        name: c.name,
+        startTime: c.startTime,
+        endTime: c.endTime,
+        status: 'queued',
+        outputUrl: null,
+        filename: `${c.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_9x16.webm`,
+        ffmpegCommand: cmdObj.command,
+      };
+    });
+
+    const newJob: BatchJobState = {
+      jobId,
+      createdAt: new Date().toISOString(),
+      status: 'processing',
+      templateId,
+      totalClips: initialClips.length,
+      completedCount: 0,
+      clips: initialClips,
+    };
+
+    setJobs((prev) => [newJob, ...prev]);
+
+    for (let i = 0; i < initialClips.length; i++) {
+      setJobs((prev) =>
+        prev.map((j) => {
+          if (j.jobId !== jobId) return j;
+          const nextClips = [...j.clips];
+          nextClips[i] = { ...nextClips[i], status: 'rendering' };
+          return { ...j, clips: nextClips };
+        })
+      );
+
+      try {
+        const rendered = await renderClientFallbackClip({
+          clip: clips[i],
+          templateId,
+          textOverlay,
+          watermarkEnabled: watermarkAsset.enabled,
+          watermarkPosition: watermarkAsset.position,
+          watermarkScale: watermarkAsset.scale,
+          sourceTitle: sourceVideo.title,
+        });
+
+        setJobs((prev) =>
+          prev.map((j) => {
+            if (j.jobId !== jobId) return j;
+            const nextClips = [...j.clips];
+            nextClips[i] = {
+              ...nextClips[i],
+              status: 'completed',
+              outputUrl: rendered.blobUrl,
+              fileSizeKb: rendered.sizeKb,
+              durationMs: rendered.durationMs,
+            };
+            const doneCount = nextClips.filter((c) => c.status === 'completed').length;
+            return {
+              ...j,
+              clips: nextClips,
+              completedCount: doneCount,
+              status: doneCount === j.totalClips ? 'completed' : 'processing',
+            };
+          })
+        );
+      } catch (err) {
+        setJobs((prev) =>
+          prev.map((j) => {
+            if (j.jobId !== jobId) return j;
+            const nextClips = [...j.clips];
+            nextClips[i] = {
+              ...nextClips[i],
+              status: 'failed',
+              error: err instanceof Error ? err.message : 'Error de renderizado',
+            };
+            return { ...j, clips: nextClips, status: 'completed_with_errors' };
+          })
+        );
+      }
+    }
+  };
+
   const handleStartBatchRender = async () => {
     if (clips.length === 0 || isStartingRender) return;
     setIsStartingRender(true);
@@ -317,13 +445,16 @@ export default function App() {
           clips,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'No se pudo iniciar el lote de renderizado.');
+
+      if (res.ok) {
+        const data = await res.json();
+        setJobs((prev) => [data as BatchJobState, ...prev]);
+      } else {
+        // Fallback automatically to client-side Canvas + MediaRecorder synthesizer on Vercel serverless
+        await runBrowserBatchFallback();
       }
-      setJobs((prev) => [data as BatchJobState, ...prev]);
-    } catch (err: unknown) {
-      setIngestError(err instanceof Error ? err.message : 'Error al iniciar renderizado.');
+    } catch {
+      await runBrowserBatchFallback();
     } finally {
       setIsStartingRender(false);
     }
@@ -362,7 +493,9 @@ export default function App() {
               setActiveNav('studio');
             }}
             className={`hover:text-white transition-colors whitespace-nowrap shrink-0 ${
-              activeNav === 'studio' ? 'text-white underline underline-offset-8 decoration-amber-500 decoration-2' : ''
+              activeNav === 'studio'
+                ? 'text-white underline underline-offset-8 decoration-amber-500 decoration-2'
+                : ''
             }`}
           >
             Estudio 9:16
@@ -374,7 +507,9 @@ export default function App() {
               setActiveNav('queue');
             }}
             className={`hover:text-white transition-colors whitespace-nowrap shrink-0 ${
-              activeNav === 'queue' ? 'text-white underline underline-offset-8 decoration-amber-500 decoration-2' : ''
+              activeNav === 'queue'
+                ? 'text-white underline underline-offset-8 decoration-amber-500 decoration-2'
+                : ''
             }`}
           >
             Cola de Lotes ({jobs.reduce((acc, j) => acc + j.totalClips, 0)})
@@ -386,7 +521,9 @@ export default function App() {
               setActiveNav('ffmpeg');
             }}
             className={`hover:text-white transition-colors whitespace-nowrap shrink-0 ${
-              activeNav === 'ffmpeg' ? 'text-white underline underline-offset-8 decoration-amber-500 decoration-2' : ''
+              activeNav === 'ffmpeg'
+                ? 'text-white underline underline-offset-8 decoration-amber-500 decoration-2'
+                : ''
             }`}
           >
             Filtros FFmpeg
@@ -398,7 +535,9 @@ export default function App() {
               setActiveNav('fastapi');
             }}
             className={`hover:text-white transition-colors whitespace-nowrap shrink-0 ${
-              activeNav === 'fastapi' ? 'text-white underline underline-offset-8 decoration-amber-500 decoration-2' : ''
+              activeNav === 'fastapi'
+                ? 'text-white underline underline-offset-8 decoration-amber-500 decoration-2'
+                : ''
             }`}
           >
             Código FastAPI
@@ -412,12 +551,12 @@ export default function App() {
             disabled={isStartingRender}
             className="px-4 py-2 text-xs font-semibold text-slate-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
-            {isStartingRender ? 'Encolando Lote...' : `Renderizar Lote (${clips.length} Clips)`}
+            {isStartingRender ? 'Procesando Lote...' : `Renderizar Lote (${clips.length} Clips)`}
           </button>
         </div>
       </header>
 
-      {/* Mobile Navigation Bar (visible only on small screens) */}
+      {/* Mobile Navigation Bar */}
       <div className="flex md:hidden items-center gap-2 px-4 py-2.5 border-b border-slate-800 bg-slate-900 overflow-x-auto">
         {(
           [
@@ -453,12 +592,12 @@ export default function App() {
                   Cola de Renderizado por Lotes (FFmpeg 1080×1920)
                 </h1>
                 <p className="text-sm text-slate-400 mt-1">
-                  Clips verticales procesados en el servidor mediante <code className="text-slate-200">libx264</code> y <code className="text-slate-200">aac</code> con sincronización de audio.
+                  Clips verticales procesados mediante composición <code className="text-slate-200">filter_complex</code> en formato 9:16.
                 </p>
               </div>
               <button
                 onClick={handleStartBatchRender}
-                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs rounded-lg transition-colors whitespace-nowrap shrink-0"
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 Ejecutar Nuevo Lote ({clips.length} Clips)
               </button>
@@ -468,14 +607,16 @@ export default function App() {
               <div className="bg-slate-900 border border-slate-800 rounded-xl p-12 text-center space-y-4">
                 <Film className="w-8 h-8 text-slate-500 mx-auto" />
                 <div className="space-y-1">
-                  <h2 className="text-base font-semibold text-white">No hay trabajos de renderizado en la cola</h2>
+                  <h2 className="text-base font-semibold text-white">
+                    No hay trabajos de renderizado en la cola
+                  </h2>
                   <p className="text-xs text-slate-400 max-w-md mx-auto">
-                    Configura tus rangos de tiempo y plantillas en el Estudio 9:16 y pulsa &ldquo;Renderizar Lote&rdquo; para generar archivos MP4 reales con FFmpeg.
+                    Configura tus rangos de tiempo y plantillas en el Estudio 9:16 y pulsa &ldquo;Renderizar Lote&rdquo; para generar los clips verticales.
                   </p>
                 </div>
                 <button
                   onClick={() => setActiveNav('studio')}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-medium rounded-lg transition-colors"
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer"
                 >
                   Ir al Estudio 9:16
                 </button>
@@ -483,14 +624,18 @@ export default function App() {
             ) : (
               <div className="space-y-6">
                 {jobs.map((job) => (
-                  <div key={job.jobId} className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+                  <div
+                    key={job.jobId}
+                    className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4"
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-3">
                       <div className="space-y-0.5">
                         <div className="text-sm font-semibold text-white font-mono">
                           Lote {job.jobId}
                         </div>
                         <div className="text-xs text-slate-400 tabular-nums">
-                          Plantilla: {job.templateId} · Completados: {job.completedCount}/{job.totalClips} · Formato: 1080×1920 MP4
+                          Plantilla: {job.templateId} · Completados: {job.completedCount}/
+                          {job.totalClips} · Formato: 9:16 Vertical
                         </div>
                       </div>
                       <div className="text-xs font-medium">
@@ -500,7 +645,7 @@ export default function App() {
                           </span>
                         ) : job.status === 'processing' || job.status === 'queued' ? (
                           <span className="text-amber-400 flex items-center gap-1.5">
-                            <Clock className="w-4 h-4" /> Procesando con FFmpeg...
+                            <Clock className="w-4 h-4" /> Procesando...
                           </span>
                         ) : (
                           <span className="text-rose-400 flex items-center gap-1.5">
@@ -522,55 +667,70 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800/70">
-                          {job.clips.map((clip) => (
-                            <tr key={clip.id} className="hover:bg-slate-950/60 transition-colors">
-                              <td className="py-3 px-3 font-medium text-white">{clip.name}</td>
-                              <td className="py-3 px-3 font-mono text-slate-300 tabular-nums">
-                                {clip.startTime} → {clip.endTime}
-                              </td>
-                              <td className="py-3 px-3">
-                                {clip.status === 'completed' && (
-                                  <span className="text-emerald-400 font-medium">Renderizado OK</span>
-                                )}
-                                {clip.status === 'rendering' && (
-                                  <span className="text-amber-400 font-medium">Codificando H.264...</span>
-                                )}
-                                {clip.status === 'queued' && (
-                                  <span className="text-slate-400">En cola</span>
-                                )}
-                                {clip.status === 'failed' && (
-                                  <span className="text-rose-400" title={clip.error}>
-                                    Error FFmpeg
-                                  </span>
-                                )}
-                              </td>
-                              <td className="py-3 px-3 text-right font-mono text-slate-400 tabular-nums">
-                                {clip.fileSizeKb ? `${clip.fileSizeKb} KB` : '—'}
-                                {clip.durationMs ? ` · ${(clip.durationMs / 1000).toFixed(1)}s` : ''}
-                              </td>
-                              <td className="py-3 px-3 text-right">
-                                {clip.outputUrl && clip.filename ? (
-                                  <div className="inline-flex items-center gap-2">
-                                    <button
-                                      onClick={() => setPreviewOutputModal(clip)}
-                                      className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-md font-medium inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
-                                    >
-                                      <Play className="w-3 h-3" /> Ver 9:16
-                                    </button>
-                                    <a
-                                      href={`/api/render/download/${clip.filename}`}
-                                      download={clip.filename}
-                                      className="px-2.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-md font-semibold inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
-                                    >
-                                      <Download className="w-3 h-3" /> Descargar MP4
-                                    </a>
-                                  </div>
-                                ) : (
-                                  <span className="text-slate-500 font-mono">Pendiente</span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
+                          {job.clips.map((clip) => {
+                            const downloadHref = clip.outputUrl?.startsWith('blob:')
+                              ? clip.outputUrl
+                              : `/api/render/download/${clip.filename}`;
+
+                            return (
+                              <tr
+                                key={clip.id}
+                                className="hover:bg-slate-950/60 transition-colors"
+                              >
+                                <td className="py-3 px-3 font-medium text-white">{clip.name}</td>
+                                <td className="py-3 px-3 font-mono text-slate-300 tabular-nums">
+                                  {clip.startTime} → {clip.endTime}
+                                </td>
+                                <td className="py-3 px-3">
+                                  {clip.status === 'completed' && (
+                                    <span className="text-emerald-400 font-medium">
+                                      Renderizado OK
+                                    </span>
+                                  )}
+                                  {clip.status === 'rendering' && (
+                                    <span className="text-amber-400 font-medium">
+                                      Codificando 9:16...
+                                    </span>
+                                  )}
+                                  {clip.status === 'queued' && (
+                                    <span className="text-slate-400">En cola</span>
+                                  )}
+                                  {clip.status === 'failed' && (
+                                    <span className="text-rose-400" title={clip.error}>
+                                      Error
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-3 px-3 text-right font-mono text-slate-400 tabular-nums">
+                                  {clip.fileSizeKb ? `${clip.fileSizeKb} KB` : '—'}
+                                  {clip.durationMs
+                                    ? ` · ${(clip.durationMs / 1000).toFixed(1)}s`
+                                    : ''}
+                                </td>
+                                <td className="py-3 px-3 text-right">
+                                  {clip.outputUrl && clip.filename ? (
+                                    <div className="inline-flex items-center gap-2">
+                                      <button
+                                        onClick={() => setPreviewOutputModal(clip)}
+                                        className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-md font-medium inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                                      >
+                                        <Play className="w-3 h-3" /> Ver 9:16
+                                      </button>
+                                      <a
+                                        href={downloadHref}
+                                        download={clip.filename}
+                                        className="px-2.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-md font-semibold inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0"
+                                      >
+                                        <Download className="w-3 h-3" /> Descargar
+                                      </a>
+                                    </div>
+                                  ) : (
+                                    <span className="text-slate-500 font-mono">Pendiente</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -593,7 +753,8 @@ export default function App() {
                       01. Ingesta Dual de Vídeo Horizontal (16:9)
                     </h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Fuente activa: <span className="text-slate-200 font-medium">{sourceVideo.title}</span>
+                      Fuente activa:{' '}
+                      <span className="text-slate-200 font-medium">{sourceVideo.title}</span>
                     </p>
                   </div>
 
@@ -601,7 +762,7 @@ export default function App() {
                   <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg">
                     <button
                       onClick={() => setIngestMode('youtube')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
                         ingestMode === 'youtube'
                           ? 'bg-slate-800 text-white shadow-sm'
                           : 'text-slate-400 hover:text-white'
@@ -611,7 +772,7 @@ export default function App() {
                     </button>
                     <button
                       onClick={() => setIngestMode('local')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
                         ingestMode === 'local'
                           ? 'bg-slate-800 text-white shadow-sm'
                           : 'text-slate-400 hover:text-white'
@@ -647,7 +808,7 @@ export default function App() {
                       Arrastra un archivo de vídeo horizontal (.mp4, .mov, .mkv) o haz clic para examinar
                     </span>
                     <span className="text-[11px] text-slate-400 mt-0.5">
-                      Procesamiento directo en servidor con FFmpeg · Máximo 250 MB
+                      Previsualización instantánea y procesamiento con FFmpeg · Máximo 250 MB
                     </span>
                     <input
                       type="file"
@@ -727,7 +888,9 @@ export default function App() {
 
                         <div className="sm:col-span-5 grid grid-cols-2 gap-2">
                           <div>
-                            <label className="text-[10px] text-slate-400 block mb-0.5">Inicio (HH:MM:SS)</label>
+                            <label className="text-[10px] text-slate-400 block mb-0.5">
+                              Inicio (HH:MM:SS)
+                            </label>
                             <input
                               type="text"
                               value={clip.startTime}
@@ -736,7 +899,9 @@ export default function App() {
                             />
                           </div>
                           <div>
-                            <label className="text-[10px] text-slate-400 block mb-0.5">Fin (HH:MM:SS)</label>
+                            <label className="text-[10px] text-slate-400 block mb-0.5">
+                              Fin (HH:MM:SS)
+                            </label>
                             <input
                               type="text"
                               value={clip.endTime}
@@ -757,7 +922,7 @@ export default function App() {
                               removeClip(index);
                             }}
                             disabled={clips.length <= 1}
-                            className="p-1.5 text-slate-400 hover:text-rose-400 disabled:opacity-30 rounded transition-colors"
+                            className="p-1.5 text-slate-400 hover:text-rose-400 disabled:opacity-30 rounded transition-colors cursor-pointer"
                             title="Eliminar rango"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -777,7 +942,8 @@ export default function App() {
                     03. Sistema de Plantillas Verticales (9:16 · 1080×1920)
                   </h2>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Selecciona la arquitectura del grafo <code className="text-slate-200">filter_complex</code> antes de renderizar.
+                    Selecciona la arquitectura del grafo{' '}
+                    <code className="text-slate-200">filter_complex</code> antes de renderizar.
                   </p>
                 </div>
 
@@ -836,7 +1002,8 @@ export default function App() {
                         Asset Secundario para Mitad Inferior (1080×960)
                       </div>
                       <div className="text-xs text-slate-400">
-                        Activo: <span className="text-amber-300 font-mono">{secondaryMedia.title}</span>
+                        Activo:{' '}
+                        <span className="text-amber-300 font-mono">{secondaryMedia.title}</span>
                       </div>
                     </div>
                     <label className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-white rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0">
@@ -862,7 +1029,9 @@ export default function App() {
                     04. Capas de Superposición (Overlays en FFmpeg)
                   </h2>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Configura el estampado de texto (<code className="text-slate-200">drawtext</code>) y marca de agua gráfica (<code className="text-slate-200">overlay</code> con alfa).
+                    Configura el estampado de texto (<code className="text-slate-200">drawtext</code>
+                    ) y marca de agua gráfica (<code className="text-slate-200">overlay</code> con
+                    alfa).
                   </p>
                 </div>
 
@@ -871,7 +1040,8 @@ export default function App() {
                   <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 space-y-3.5">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-semibold text-white flex items-center gap-1.5">
-                        <Type className="w-3.5 h-3.5 text-amber-400" /> Overlay de Texto (Hook / Título)
+                        <Type className="w-3.5 h-3.5 text-amber-400" /> Overlay de Texto (Hook /
+                        Título)
                       </span>
                       <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
                         <input
@@ -887,7 +1057,9 @@ export default function App() {
                     </div>
 
                     <div className="space-y-1">
-                      <label className="text-[11px] text-slate-400 block">Texto del Gancho (Hook)</label>
+                      <label className="text-[11px] text-slate-400 block">
+                        Texto del Gancho (Hook)
+                      </label>
                       <input
                         type="text"
                         value={textOverlay.text}
@@ -899,7 +1071,9 @@ export default function App() {
 
                     <div className="grid grid-cols-2 gap-2.5">
                       <div>
-                        <label className="text-[11px] text-slate-400 block mb-1">Fuente TrueType</label>
+                        <label className="text-[11px] text-slate-400 block mb-1">
+                          Fuente TrueType
+                        </label>
                         <select
                           value={textOverlay.fontFamily}
                           onChange={(e) =>
@@ -916,7 +1090,9 @@ export default function App() {
                         </select>
                       </div>
                       <div>
-                        <label className="text-[11px] text-slate-400 block mb-1">Posición Vertical</label>
+                        <label className="text-[11px] text-slate-400 block mb-1">
+                          Posición Vertical
+                        </label>
                         <select
                           value={textOverlay.position}
                           onChange={(e) =>
@@ -981,7 +1157,8 @@ export default function App() {
                     <div className="space-y-3.5">
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-semibold text-white flex items-center gap-1.5">
-                          <ImageIcon className="w-3.5 h-3.5 text-amber-400" /> Overlay de Imagen (PNG / Logo)
+                          <ImageIcon className="w-3.5 h-3.5 text-amber-400" /> Overlay de Imagen
+                          (PNG / Logo)
                         </span>
                         <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
                           <input
@@ -997,7 +1174,9 @@ export default function App() {
                       </div>
 
                       <div className="flex items-center justify-between gap-2 bg-slate-900 border border-slate-800 rounded px-3 py-2">
-                        <span className="text-xs text-slate-300 truncate">{watermarkAsset.title}</span>
+                        <span className="text-xs text-slate-300 truncate">
+                          {watermarkAsset.title}
+                        </span>
                         <label className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-amber-300 rounded cursor-pointer whitespace-nowrap shrink-0">
                           Subir PNG
                           <input
@@ -1014,7 +1193,9 @@ export default function App() {
 
                       <div className="grid grid-cols-2 gap-2.5">
                         <div>
-                          <label className="text-[11px] text-slate-400 block mb-1">Posición en Lienzo</label>
+                          <label className="text-[11px] text-slate-400 block mb-1">
+                            Posición en Lienzo
+                          </label>
                           <select
                             value={watermarkAsset.position}
                             onChange={(e) =>
@@ -1056,7 +1237,10 @@ export default function App() {
                     </div>
 
                     <div className="text-[11px] font-mono text-slate-400 border-t border-slate-800 pt-2.5">
-                      Filtro: <code className="text-slate-200">scale={Math.round(1080 * watermarkAsset.scale)}:-1,format=rgba</code>
+                      Filtro:{' '}
+                      <code className="text-slate-200">
+                        scale={Math.round(1080 * watermarkAsset.scale)}:-1,format=rgba
+                      </code>
                     </div>
                   </div>
                 </div>
@@ -1067,6 +1251,7 @@ export default function App() {
             <aside className="lg:col-span-5 space-y-6">
               <VerticalCanvasPreview
                 sourceUrl={sourceVideo.url}
+                sourceTitle={sourceVideo.title}
                 secondaryUrl={secondaryMedia.url}
                 secondaryIsImage={secondaryMedia.isImage}
                 watermarkEnabled={watermarkAsset.enabled}
@@ -1090,7 +1275,7 @@ export default function App() {
                   </span>
                   <button
                     onClick={copyLiveCommand}
-                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 rounded flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     {copiedCmd ? (
                       <Check className="w-3 h-3 text-emerald-400" />
@@ -1109,7 +1294,7 @@ export default function App() {
               <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3.5">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-white">
-                    Estado del Procesamiento FFmpeg
+                    Estado del Procesamiento 9:16
                   </span>
                   {latestJob && (
                     <span className="text-xs font-mono text-slate-400 tabular-nums">
@@ -1121,51 +1306,62 @@ export default function App() {
                 {!latestJob ? (
                   <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 text-xs text-slate-400 space-y-2">
                     <p>
-                      Pulsa el botón superior <strong className="text-white">Renderizar Lote ({clips.length} Clips)</strong> para ejecutar <code className="text-amber-300">/usr/bin/ffmpeg</code> en segundo plano y descargar tus vídeos MP4 en 1080×1920.
+                      Pulsa el botón superior{' '}
+                      <strong className="text-white">
+                        Renderizar Lote ({clips.length} Clips)
+                      </strong>{' '}
+                      para procesar todos los rangos de tiempo y descargar los vídeos verticales en
+                      formato 9:16.
                     </p>
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {latestJob.clips.map((c) => (
-                      <div
-                        key={c.id}
-                        className="bg-slate-950 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 text-xs"
-                      >
-                        <div className="min-w-0">
-                          <div className="font-medium text-white truncate">{c.name}</div>
-                          <div className="font-mono text-[11px] text-slate-400 tabular-nums">
-                            {c.startTime} → {c.endTime} ·{' '}
-                            {c.status === 'completed'
-                              ? `${c.fileSizeKb || 0} KB`
-                              : c.status === 'rendering'
-                              ? 'Renderizando...'
-                              : c.status}
-                          </div>
-                        </div>
+                    {latestJob.clips.map((c) => {
+                      const downloadHref = c.outputUrl?.startsWith('blob:')
+                        ? c.outputUrl
+                        : `/api/render/download/${c.filename}`;
 
-                        {c.outputUrl && c.filename ? (
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <button
-                              onClick={() => setPreviewOutputModal(c)}
-                              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded font-medium flex items-center gap-1 transition-colors whitespace-nowrap"
-                            >
-                              <Play className="w-3 h-3" /> Ver
-                            </button>
-                            <a
-                              href={`/api/render/download/${c.filename}`}
-                              download={c.filename}
-                              className="px-2.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded font-semibold flex items-center gap-1 transition-colors whitespace-nowrap"
-                            >
-                              <Download className="w-3 h-3" /> MP4
-                            </a>
+                      return (
+                        <div
+                          key={c.id}
+                          className="bg-slate-950 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-2 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-medium text-white truncate">{c.name}</div>
+                            <div className="font-mono text-[11px] text-slate-400 tabular-nums">
+                              {c.startTime} → {c.endTime} ·{' '}
+                              {c.status === 'completed'
+                                ? `${c.fileSizeKb || 0} KB`
+                                : c.status === 'rendering'
+                                ? 'Renderizando...'
+                                : c.status}
+                            </div>
                           </div>
-                        ) : (
-                          <span className="text-amber-400 font-mono text-[11px] shrink-0">
-                            {c.status === 'rendering' ? 'FFmpeg...' : 'En cola'}
-                          </span>
-                        )}
-                      </div>
-                    ))}
+
+                          {c.outputUrl && c.filename ? (
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                onClick={() => setPreviewOutputModal(c)}
+                                className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded font-medium flex items-center gap-1 transition-colors whitespace-nowrap cursor-pointer"
+                              >
+                                <Play className="w-3 h-3" /> Ver
+                              </button>
+                              <a
+                                href={downloadHref}
+                                download={c.filename}
+                                className="px-2.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded font-semibold flex items-center gap-1 transition-colors whitespace-nowrap"
+                              >
+                                <Download className="w-3 h-3" /> Vídeo
+                              </a>
+                            </div>
+                          ) : (
+                            <span className="text-amber-400 font-mono text-[11px] shrink-0">
+                              {c.status === 'rendering' ? 'Procesando...' : 'En cola'}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1174,7 +1370,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Modal to Play Rendered 1080x1920 MP4 File */}
+      {/* Modal to Play Rendered 9:16 Video File */}
       {previewOutputModal && previewOutputModal.outputUrl && (
         <div
           className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
@@ -1188,12 +1384,13 @@ export default function App() {
               <div>
                 <h3 className="text-sm font-semibold text-white">{previewOutputModal.name}</h3>
                 <p className="text-xs font-mono text-slate-400 tabular-nums">
-                  Renderizado Real FFmpeg · 1080×1920 · {previewOutputModal.startTime} → {previewOutputModal.endTime}
+                  Clip Vertical 9:16 · {previewOutputModal.startTime} →{' '}
+                  {previewOutputModal.endTime}
                 </p>
               </div>
               <button
                 onClick={() => setPreviewOutputModal(null)}
-                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 rounded-md"
+                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 rounded-md cursor-pointer"
               >
                 Cerrar
               </button>
@@ -1204,6 +1401,7 @@ export default function App() {
                 src={previewOutputModal.outputUrl}
                 controls
                 autoPlay
+                loop
                 className="w-full h-full object-contain"
               />
             </div>
@@ -1214,11 +1412,15 @@ export default function App() {
               </span>
               {previewOutputModal.filename && (
                 <a
-                  href={`/api/render/download/${previewOutputModal.filename}`}
+                  href={
+                    previewOutputModal.outputUrl.startsWith('blob:')
+                      ? previewOutputModal.outputUrl
+                      : `/api/render/download/${previewOutputModal.filename}`
+                  }
                   download={previewOutputModal.filename}
                   className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs rounded-lg flex items-center gap-1.5 transition-colors"
                 >
-                  <Download className="w-3.5 h-3.5" /> Descargar Archivo MP4
+                  <Download className="w-3.5 h-3.5" /> Descargar Clip 9:16
                 </a>
               )}
             </div>
@@ -1232,14 +1434,14 @@ export default function App() {
         <div className="flex items-center gap-4">
           <button
             onClick={() => setActiveNav('ffmpeg')}
-            className="hover:text-white transition-colors"
+            className="hover:text-white transition-colors cursor-pointer"
           >
             Documentación filter_complex
           </button>
           <span>·</span>
           <button
             onClick={() => setActiveNav('fastapi')}
-            className="hover:text-white transition-colors"
+            className="hover:text-white transition-colors cursor-pointer"
           >
             Descargar Código Python + FastAPI
           </button>

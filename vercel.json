@@ -5,7 +5,6 @@
       "root": ".",
       "framework": "vite",
       "buildCommand": "npm run build",
-      "outputDirectory": "dist",
       "bindings": [
         {
           "type": "service",
@@ -24,24 +23,6 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": {
-        "service": "python_fastapi_project"
-      }
-    },
-    {
-      "source": "/uploads/(.*)",
-      "destination": {
-        "service": "python_fastapi_project"
-      }
-    },
-    {
-      "source": "/media-assets/(.*)",
-      "destination": {
-        "service": "python_fastapi_project"
-      }
-    },
-    {
-      "source": "/outputs/(.*)",
       "destination": {
         "service": "python_fastapi_project"
       }
