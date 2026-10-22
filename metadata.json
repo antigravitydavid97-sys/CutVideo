@@ -1,0 +1,6 @@
+{
+  "name": "VertiClip Studio — FFmpeg & FastAPI Vertical Video Engine",
+  "description": "Aplicación web completa y motor de procesamiento FFmpeg para extraer, reencuadrar y renderizar clips verticales 9:16 (1080x1920) en lote para Shorts, Reels y TikTok.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

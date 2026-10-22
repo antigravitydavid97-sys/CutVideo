@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VertiClip Studio — Editor Automatizado 9:16 (FastAPI + FFmpeg)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
+  <header class="border-b border-slate-800 px-6 py-4 flex items-center justify-between">
+    <div class="text-lg font-bold tracking-tight text-white">VertiClip Studio</div>
+    <div class="text-xs font-mono text-slate-400">Salida 9:16 · 1080x1920 · H.264 + AAC</div>
+  </header>
+
+  <main class="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+    <!-- Columna Izquierda: Ingesta + Timestamps + Configuración -->
+    <section class="lg:col-span-7 space-y-6">
+      <!-- 1. Ingesta Dual -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
+        <h2 class="text-base font-semibold text-white">01. Ingesta de Vídeo (16:9)</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="space-y-2">
+            <label class="text-xs text-slate-400 block">Descargar desde URL de YouTube (yt-dlp)</label>
+            <div class="flex gap-2">
+              <input id="ytUrl" type="url" placeholder="https://www.youtube.com/watch?v=..."
+                class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white" />
+              <button onclick="ingestYouTube()" class="px-4 py-2 bg-amber-500 text-slate-950 font-semibold text-xs rounded-lg whitespace-nowrap">
+                Descargar
+              </button>
+            </div>
+          </div>
+          <div class="space-y-2">
+            <label class="text-xs text-slate-400 block">O subir archivo local (.mp4, .mov, .mkv)</label>
+            <input id="videoFile" type="file" accept=".mp4,.mov,.mkv" onchange="uploadAsset(this, 'source_video')"
+              class="w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-slate-800 file:text-slate-200" />
+          </div>
+        </div>
+        <div id="ingestStatus" class="text-xs font-mono text-emerald-400"></div>
+      </div>
+
+      <!-- 2. Gestión de Códigos de Tiempo (Batch Clipping) -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
+        <div class="flex items-center justify-between">
+          <h2 class="text-base font-semibold text-white">02. Lote de Clips (Timestamps)</h2>
+          <button onclick="addClipRow()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-medium rounded-lg">
+            + Añadir Rango
+          </button>
+        </div>
+        <div id="clipsContainer" class="space-y-2"></div>
+      </div>
+
+      <!-- 3. Plantillas Verticales (9:16) -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
+        <h2 class="text-base font-semibold text-white">03. Plantilla de Composición 9:16 (1080x1920)</h2>
+        <div class="grid grid-cols-3 gap-3">
+          <button onclick="selectTemplate('blur_bg')" id="tpl-blur_bg"
+            class="p-3 rounded-lg border border-amber-500 bg-amber-500/10 text-left">
+            <div class="text-xs font-semibold text-white">Plantilla 1: Fondo Blur</div>
+            <div class="text-[11px] text-slate-400 mt-1">16:9 centrado + fondo 9:16 desenfocado</div>
+          </button>
+          <button onclick="selectTemplate('split_screen')" id="tpl-split_screen"
+            class="p-3 rounded-lg border border-slate-800 bg-slate-950 text-left">
+            <div class="text-xs font-semibold text-white">Plantilla 2: Split Screen</div>
+            <div class="text-[11px] text-slate-400 mt-1">Mitad superior vídeo + inferior loop</div>
+          </button>
+          <button onclick="selectTemplate('full_crop')" id="tpl-full_crop"
+            class="p-3 rounded-lg border border-slate-800 bg-slate-950 text-left">
+            <div class="text-xs font-semibold text-white">Plantilla 3: Full Crop</div>
+            <div class="text-[11px] text-slate-400 mt-1">Recorte central directo 9:16</div>
+          </button>
+        </div>
+        <div id="secondaryUploadBox" class="hidden pt-2 border-t border-slate-800">
+          <label class="text-xs text-slate-400 block mb-1">Subir Vídeo/Imagen Secundaria (Mitad Inferior Split Screen)</label>
+          <input type="file" accept=".mp4,.mov,.png,.jpg,.jpeg" onchange="uploadAsset(this, 'secondary_media')"
+            class="text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-slate-800 file:text-slate-200" />
+        </div>
+      </div>
+
+      <!-- 4. Capas de Superposición (Overlays) -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
+        <h2 class="text-base font-semibold text-white">04. Superposiciones (Texto Hook & Marca de Agua PNG)</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="space-y-2">
+            <label class="flex items-center gap-2 text-xs font-medium text-slate-300">
+              <input id="textEnabled" type="checkbox" checked onchange="updatePreview()" /> Activar Texto (drawtext)
+            </label>
+            <input id="hookText" type="text" value="EL SECRETO QUE NADIE TE CUENTA" oninput="updatePreview()"
+              class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white" />
+            <div class="grid grid-cols-3 gap-2">
+              <select id="textPos" onchange="updatePreview()" class="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs">
+                <option value="top">Arriba</option>
+                <option value="center">Centro</option>
+                <option value="bottom">Abajo</option>
+              </select>
+              <input id="fontSize" type="number" value="54" oninput="updatePreview()"
+                class="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs font-mono" />
+              <input id="fontColor" type="color" value="#ffffff" oninput="updatePreview()"
+                class="w-full h-8 bg-slate-950 border border-slate-800 rounded-lg" />
+            </div>
+          </div>
+
+          <div class="space-y-2">
+            <label class="text-xs font-medium text-slate-300 block">Logo / Marca de Agua PNG</label>
+            <input type="file" accept=".png" onchange="uploadAsset(this, 'watermark')"
+              class="w-full text-xs text-slate-300 file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-slate-800 file:text-slate-200" />
+            <div class="grid grid-cols-2 gap-2">
+              <select id="wmPos" onchange="updatePreview()" class="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs">
+                <option value="top-right">Esquina Sup. Der.</option>
+                <option value="top-left">Esquina Sup. Izq.</option>
+                <option value="bottom-right">Esquina Inf. Der.</option>
+                <option value="bottom-left">Esquina Inf. Izq.</option>
+                <option value="center">Centro</option>
+              </select>
+              <input id="wmScale" type="number" step="0.05" min="0.05" max="0.6" value="0.20"
+                class="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs font-mono" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <button onclick="startBatchRender()" class="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm rounded-xl transition">
+        Renderizar Lote en 1080x1920 (FFmpeg)
+      </button>
+    </section>
+
+    <!-- Columna Derecha: Previsualización 9:16 y Cola de Renderizado -->
+    <aside class="lg:col-span-5 space-y-6">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col items-center">
+        <div class="w-full flex items-center justify-between mb-3">
+          <span class="text-xs font-semibold text-slate-300">Lienzo de Previsualización 9:16</span>
+          <span class="text-xs font-mono text-slate-400">1080 × 1920 px</span>
+        </div>
+        <div id="previewCanvas" class="w-64 aspect-[9/16] bg-slate-950 border border-slate-700 rounded-2xl relative overflow-hidden flex flex-col justify-center items-center">
+          <div id="previewBg" class="absolute inset-0 bg-gradient-to-b from-slate-800 to-slate-950 opacity-75"></div>
+          <div id="previewMain" class="relative z-10 w-full aspect-video bg-slate-800 border-y border-slate-600 flex items-center justify-center text-xs text-slate-300">
+            Vídeo 16:9 Centrado
+          </div>
+          <div id="previewHook" class="absolute top-6 z-20 px-3 py-1 bg-black/80 text-white font-bold text-xs text-center rounded">
+            EL SECRETO QUE NADIE TE CUENTA
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
+        <h3 class="text-sm font-semibold text-white">Estado de la Cola de Renderizado</h3>
+        <div id="jobQueue" class="space-y-2 text-xs text-slate-400">No hay trabajos activos.</div>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    let state = {
+      source_video_filename: "",
+      secondary_media_filename: null,
+      watermark_filename: null,
+      template_id: "blur_bg",
+      clips: [
+        { clip_id: "hook_principal", start_time: "00:00:05", end_time: "00:00:20" },
+        { clip_id: "momento_viral", start_time: "00:01:15", end_time: "00:01:45" }
+      ]
+    };
+
+    function renderClipRows() {
+      const container = document.getElementById("clipsContainer");
+      container.innerHTML = state.clips.map((c, idx) => `
+        <div class="grid grid-cols-12 gap-2 items-center bg-slate-950 p-2 rounded-lg border border-slate-800">
+          <input value="${c.clip_id}" oninput="state.clips[${idx}].clip_id=this.value"
+            class="col-span-5 bg-slate-900 border border-slate-800 rounded px-2 py-1 text-xs" placeholder="Nombre del clip" />
+          <input value="${c.start_time}" oninput="state.clips[${idx}].start_time=this.value"
+            class="col-span-3 bg-slate-900 border border-slate-800 rounded px-2 py-1 text-xs font-mono" placeholder="00:00:00" />
+          <input value="${c.end_time}" oninput="state.clips[${idx}].end_time=this.value"
+            class="col-span-3 bg-slate-900 border border-slate-800 rounded px-2 py-1 text-xs font-mono" placeholder="00:00:30" />
+          <button onclick="removeClipRow(${idx})" class="col-span-1 text-rose-400 hover:text-rose-300 text-xs font-bold">✕</button>
+        </div>
+      `).join("");
+    }
+
+    function addClipRow() {
+      state.clips.push({ clip_id: `clip_${state.clips.length + 1}`, start_time: "00:00:00", end_time: "00:00:30" });
+      renderClipRows();
+    }
+
+    function removeClipRow(idx) {
+      state.clips.splice(idx, 1);
+      renderClipRows();
+    }
+
+    function selectTemplate(tpl) {
+      state.template_id = tpl;
+      ["blur_bg", "split_screen", "full_crop"].forEach(id => {
+        const btn = document.getElementById("tpl-" + id);
+        btn.className = id === tpl
+          ? "p-3 rounded-lg border border-amber-500 bg-amber-500/10 text-left"
+          : "p-3 rounded-lg border border-slate-800 bg-slate-950 text-left";
+      });
+      document.getElementById("secondaryUploadBox").classList.toggle("hidden", tpl !== "split_screen");
+      updatePreview();
+    }
+
+    function updatePreview() {
+      const hook = document.getElementById("previewHook");
+      const enabled = document.getElementById("textEnabled").checked;
+      hook.style.display = enabled ? "block" : "none";
+      hook.textContent = document.getElementById("hookText").value;
+    }
+
+    async function ingestYouTube() {
+      const url = document.getElementById("ytUrl").value;
+      const status = document.getElementById("ingestStatus");
+      status.textContent = "Descargando vídeo con yt-dlp...";
+      const res = await fetch("/api/ingest/youtube", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        state.source_video_filename = data.filename;
+        status.textContent = `Listo: ${data.title} (${data.filename})`;
+      } else {
+        status.textContent = `Error: ${data.detail}`;
+      }
+    }
+
+    async function uploadAsset(input, assetType) {
+      if (!input.files.length) return;
+      const formData = new FormData();
+      formData.append("file", input.files[0]);
+      formData.append("asset_type", assetType);
+      const res = await fetch("/api/ingest/upload", { method: "POST", body: formData });
+      const data = await res.json();
+      if (res.ok) {
+        if (assetType === "source_video") state.source_video_filename = data.filename;
+        if (assetType === "secondary_media") state.secondary_media_filename = data.filename;
+        if (assetType === "watermark") state.watermark_filename = data.filename;
+        document.getElementById("ingestStatus").textContent = `Subido (${assetType}): ${data.filename}`;
+      }
+    }
+
+    async function startBatchRender() {
+      const payload = {
+        source_video_filename: state.source_video_filename,
+        template_id: state.template_id,
+        secondary_media_filename: state.secondary_media_filename,
+        watermark_filename: state.watermark_filename,
+        watermark_position: document.getElementById("wmPos").value,
+        watermark_scale: parseFloat(document.getElementById("wmScale").value),
+        text_overlay: {
+          enabled: document.getElementById("textEnabled").checked,
+          text: document.getElementById("hookText").value,
+          font_size: parseInt(document.getElementById("fontSize").value, 10),
+          font_color: document.getElementById("fontColor").value,
+          position: document.getElementById("textPos").value
+        },
+        clips: state.clips
+      };
+      const res = await fetch("/api/render/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const job = await res.json();
+      if (res.ok) pollJob(job.job_id);
+    }
+
+    async function pollJob(jobId) {
+      const timer = setInterval(async () => {
+        const res = await fetch(`/api/render/status/${jobId}`);
+        const job = await res.json();
+        const box = document.getElementById("jobQueue");
+        box.innerHTML = job.clips.map(c => `
+          <div class="p-2.5 bg-slate-950 border border-slate-800 rounded-lg flex items-center justify-between">
+            <div>
+              <div class="font-semibold text-white">${c.clip_id}</div>
+              <div class="font-mono text-[11px] text-slate-400">${c.start_time} → ${c.end_time} · ${c.status}</div>
+            </div>
+            ${c.output_url ? `<a href="/api/render/download/${c.filename}" class="px-3 py-1 bg-emerald-500 text-slate-950 font-bold rounded text-xs">Descargar MP4</a>` : ""}
+          </div>
+        `).join("");
+        if (job.status.startsWith("completed")) clearInterval(timer);
+      }, 1500);
+    }
+
+    renderClipRows();
+  </script>
+</body>
+</html>
